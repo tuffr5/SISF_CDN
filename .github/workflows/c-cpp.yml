@@ -17,6 +17,11 @@ jobs:
 #      run: ./configure
     - name: install-depends
       run: sudo apt install -y libboost-all-dev libsqlite3-dev libasio-dev
+    - name: submodule-init
+      run: git submodule init
+      run: git submodule update
+      run: cd x264; make -j 5; cd ..
+      run: cd zstd; make -j 5; cd ..
     - name: make
       run: make
 #    - name: make check
