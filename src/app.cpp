@@ -27,7 +27,9 @@
 
 #include "counter.hpp"
 
-#define DATA_PATH std::string("./data/")
+// d e f i n e DATA_PATH std::string("./data/")
+
+std::string DATA_PATH = "./data/"
 
 using json = nlohmann::json;
 using basic_json = nlohmann::json;
@@ -221,6 +223,20 @@ void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, siz
 
 int main(int argc, char *argv[])
 {
+	{
+		int port = 6000;
+		if (argc > 1)
+		{
+			std::istringstream iss(argv[1]);
+			iss >> port;
+
+			if (argc > 2)
+			{
+				DATA_PATH = std::string(argv[2]);
+			}
+		}
+	}
+
 	load_inventory();
 
 	// Create App with CORS enabled
@@ -1260,13 +1276,6 @@ int main(int argc, char *argv[])
 		log_time(data_id, "READ", scale, x_end-x_begin, y_end-y_begin, z_end-z_begin, begin); });
 
 	{ // App start logic
-		int port = 6000;
-		if (argc > 1)
-		{
-			std::istringstream iss(argv[1]);
-			iss >> port;
-		}
-
 		std::cout << "Using port: " << port << std::endl;
 
 		app.port(port)
