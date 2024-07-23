@@ -1,4 +1,4 @@
-name: C/C++ CI
+name: C/C++ Build Check
 
 on:
   push:
@@ -15,21 +15,11 @@ jobs:
     - uses: actions/checkout@v4
       with:
         submodules: 'true'
-#    - name: configure
-#      run: ./configure
     - name: install-depends
       run: sudo apt install -y libboost-all-dev libsqlite3-dev libasio-dev nasm
-    #- name: submodule-init
-    #  run: git submodule init
-    #- name: submodule-update
-    #  run: git submodule update
     - name: build-x264
       run: cd x264; make -j 5; cd ..
     - name: build-zstd
       run: cd zstd; make -j 5; cd ..
     - name: make
       run: make
-#    - name: make check
-#      run: make check
-#    - name: make distcheck
-#      run: make distcheck
