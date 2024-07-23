@@ -29,9 +29,10 @@
 
 // d e f i n e DATA_PATH std::string("./data/")
 
+int port = 6000;
 std::string DATA_PATH = "./data/";
 
-	using json = nlohmann::json;
+using json = nlohmann::json;
 using basic_json = nlohmann::json;
 
 typedef std::tuple<float, float, float, float, int> swc_line;
@@ -224,7 +225,6 @@ void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, siz
 int main(int argc, char *argv[])
 {
 	{
-		int port = 6000;
 		if (argc > 1)
 		{
 			std::istringstream iss(argv[1]);
