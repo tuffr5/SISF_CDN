@@ -13,14 +13,16 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        submodules: 'true'
 #    - name: configure
 #      run: ./configure
     - name: install-depends
       run: sudo apt install -y libboost-all-dev libsqlite3-dev libasio-dev
-    - name: submodule-init
-      run: git submodule init
-    - name: submodule-update
-      run: git submodule update
+    #- name: submodule-init
+    #  run: git submodule init
+    #- name: submodule-update
+    #  run: git submodule update
     - name: build-x264
       run: cd x264; make -j 5; cd ..
     - name: build-zstd
