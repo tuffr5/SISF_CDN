@@ -18,7 +18,7 @@
 
 #include "vidlib.hpp"
 
-#include "../lib/zstd/lib/zstd.h"
+#include "../zstd/lib/zstd.h"
 
 #define CHUNK_TIMER 0
 #define DEBUG_SLICING 0
