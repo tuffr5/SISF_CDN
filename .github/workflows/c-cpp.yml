@@ -18,7 +18,7 @@ jobs:
 #    - name: configure
 #      run: ./configure
     - name: install-depends
-      run: sudo apt install -y libboost-all-dev libsqlite3-dev libasio-dev
+      run: sudo apt install -y libboost-all-dev libsqlite3-dev libasio-dev nasm
     #- name: submodule-init
     #  run: git submodule init
     #- name: submodule-update

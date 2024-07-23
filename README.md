@@ -22,6 +22,7 @@ This repository has been extensively tested under Ubuntu versions 22.04LTS and 2
 - `libboost-all-dev`
 - `libsqlite3-dev`
 - `libasio-dev`
+- `nasm`
 
 ## Git Submodules
 
