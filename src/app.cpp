@@ -27,7 +27,7 @@
 
 #include "counter.hpp"
 
-#define DATA_PATH std::string("/sonic2/")
+#define DATA_PATH std::string("./data/")
 
 using json = nlohmann::json;
 using basic_json = nlohmann::json;
