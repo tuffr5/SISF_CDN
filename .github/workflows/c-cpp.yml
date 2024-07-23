@@ -19,8 +19,11 @@ jobs:
       run: sudo apt install -y libboost-all-dev libsqlite3-dev libasio-dev
     - name: submodule-init
       run: git submodule init
+    - name: submodule-update
       run: git submodule update
+    - name: build-x264
       run: cd x264; make -j 5; cd ..
+    - name: build-zstd
       run: cd zstd; make -j 5; cd ..
     - name: make
       run: make
