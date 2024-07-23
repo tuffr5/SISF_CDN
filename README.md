@@ -1,10 +1,10 @@
 # Scalable Image Storage Format (SISF) CDN
 A tool for remote access of SISF Files over HTTP.
 
-# Endpoint Definitions
+## Endpoint Definitions
 TODO
 
-# C++ Libraries
+## C++ Libraries
 
 1. Crow-cpp ([https://crowcpp.org/master/](https://crowcpp.org/master/))
    - see `src/crow.h` for more information.
@@ -13,9 +13,9 @@ TODO
 3. JSON for Modern C++ from Niels Lohmann ([https://github.com/nlohmann/json](https://github.com/nlohmann/json))
    - see `src/json.hpp` for more information.
 
-# Setup
+## Local Setup
 
-## Platform
+### Platform
 This repository has been extensively tested under Ubuntu versions 22.04LTS and 24.04LTS. Before begining, ensure that the following packages/libraries are installed:
 - `build-essential`
 - `git`
@@ -24,7 +24,7 @@ This repository has been extensively tested under Ubuntu versions 22.04LTS and 2
 - `libasio-dev`
 - `nasm`
 
-## Git Submodules
+### Git Submodules
 
 There are two libraries which are imported using Git submodules which are required for building:
 1. libzstd [https://github.com/facebook/zstd](https://github.com/facebook/zstd)
@@ -44,13 +44,15 @@ make -j 20
 cd ..
 ```
 
-# Metadata Schema
+## Docker Setup
 
-## Introduction
+## Metadata Schema
+
+### Introduction
 
 The data storage strategy described here relies on two layers of segmentation
 
-## Archive structure
+### Archive structure
 
 ```
 (root)
@@ -71,7 +73,7 @@ The data storage strategy described here relies on two layers of segmentation
 - Individual parts of this structure can be symlinked to different file systems (e.g. tmpfs or a cache SSD)
 - 
 
-## Chunk naming scheme
+### Chunk naming scheme
 
 ```
 chunk_0_0_0.0.1X.data
@@ -83,7 +85,7 @@ chunk_0_0_0.0.1X.data
                ^-------- downsampling rate
 ```
 
-## Contents of metadata.bin
+### Contents of metadata.bin
 
 ```
 [uint16_t version]
@@ -100,7 +102,7 @@ chunk_0_0_0.0.1X.data
 [uint64_t sizez]
 ```
 
-## Content of image.meta
+### Content of image.meta
 
 ```
 [uint16_t version]
@@ -126,8 +128,8 @@ for i in range(count):
     [uint32_t size]
 ```
 
-## Parameter options
+### Parameter options
 
-### `dtype`
+#### `dtype`
 - `1 -> uint16`
 - `2 -> uint8` (not implemented) 
