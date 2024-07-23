@@ -29,9 +29,9 @@
 
 // d e f i n e DATA_PATH std::string("./data/")
 
-std::string DATA_PATH = "./data/"
+std::string DATA_PATH = "./data/";
 
-using json = nlohmann::json;
+	using json = nlohmann::json;
 using basic_json = nlohmann::json;
 
 typedef std::tuple<float, float, float, float, int> swc_line;
