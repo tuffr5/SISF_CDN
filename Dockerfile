@@ -1,5 +1,7 @@
 FROM ubuntu:24.04
 
+ARG CDN_PORT=6000
+
 WORKDIR /app
 
 COPY . .
@@ -11,4 +13,6 @@ RUN cd zstd; make -j 5; cd ..
 
 RUN make 
 
-CMD ["./nTracer_cdn"]
+EXPOSE ${CDN_PORT}
+
+CMD ["./nTracer_cdn", "6000", "/data/"]
