@@ -7,11 +7,11 @@ TODO
 # C++ Libraries
 
 1. Crow-cpp ([https://crowcpp.org/master/](https://crowcpp.org/master/))
-  - see `src/crow.h` for more information.
+   - see `src/crow.h` for more information.
 2. C++ Subprocess from Arun Muralidharan ([https://github.com/arun11299/cpp-subprocess](https://github.com/arun11299/cpp-subprocess))
-  - see `src/subprocess.hpp` for more information.
+   - see `src/subprocess.hpp` for more information.
 3. JSON for Modern C++ from Niels Lohmann ([https://github.com/nlohmann/json](https://github.com/nlohmann/json))
-  - see `src/json.hpp` for more information.
+   - see `src/json.hpp` for more information.
 
 # Setup
 
