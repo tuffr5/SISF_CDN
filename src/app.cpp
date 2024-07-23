@@ -27,8 +27,6 @@
 
 #include "counter.hpp"
 
-// d e f i n e DATA_PATH std::string("./data/")
-
 int port = 6000;
 std::string DATA_PATH = "./data/";
 
