@@ -1,4 +1,4 @@
-# SISF_CDN
+# Scalable Image Storage Format (SISF) CDN
 A tool for remote access of SISF Files over HTTP.
 
 # Endpoint Definitions
