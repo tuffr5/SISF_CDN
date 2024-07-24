@@ -15,4 +15,4 @@ RUN make
 
 EXPOSE ${CDN_PORT}
 
-CMD ["./nTracer_cdn", "${CDN_PORT}", "/data/"]
+CMD ["./nTracer_cdn", "6000", "/data/"]
