@@ -46,6 +46,12 @@ cd ..
 
 ## Docker Setup
 
+With each build, a Docker image is built and released at: [https://hub.docker.com/r/geeklogan/sisf_cdn](https://hub.docker.com/r/geeklogan/sisf_cdn). An example command to run this image is:
+
+```
+sudo docker run -d --mount type=bind,source=/<your_data_folder>/,target=/data geeklogan/sisf_cdn
+```
+
 ## Metadata Schema
 
 ### Introduction
