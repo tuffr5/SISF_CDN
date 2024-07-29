@@ -1196,6 +1196,81 @@ int main(int argc, char *argv[])
 
 	// @app.route("/data/<data_id>/<resolution>/<key>-<key>-<key>")
 	// This has to be last in the route list because it acts as a wildcard
+	CROW_ROUTE(app, "/<string>/raw_access/<string>/<string>")
+	([](crow::response &res, std::string data_id, std::string resolution_id, std::string tile_key)
+	 {
+		std::vector<std::string> data_id_parts = str_split(data_id, '+');
+		std::vector<std::pair<std::string, std::string>> filters;
+
+		if(data_id_parts.size() == 2) {
+				std::string filter_params = data_id_parts[1];
+				std::vector<std::string> filter_keys = str_split(filter_params, '&');
+				for(auto filter_key : filter_keys) {
+					std::vector<std::string> filter_parsed = str_split(filter_key, '=');
+
+					if(filter_parsed.size() == 2) {
+						filters.push_back( {filter_parsed[0], filter_parsed[1]} );
+					} else {
+						//std::cout << "Failed to parse filter " << filter_key << std::endl;
+					}
+				}
+		} else {
+			//std::cout << "Failed to parse filterset." << std::endl;
+		}
+
+		for (const auto& pair : filters) {
+        	std::cout << "Key: " << pair.first << ", Value: " << pair.second << std::endl;
+    	}
+
+		data_id = data_id_parts[0];
+		auto archive_search = archive_inventory.find(data_id);
+		if(archive_search == archive_inventory.end()) {
+			res.end();
+			return;
+		}
+
+		archive_reader * reader = archive_search->second;
+
+		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
+		// <xBegin>-<xEnd>_<yBegin>-<yEnd>_<zBegin>-<zEnd>
+		sscanf(tile_key.c_str(), "%u-%u_%u-%u_%u-%u", &x_begin, &x_end, &y_begin, &y_end, &z_begin, &z_end);
+
+		size_t chunk_sizes[3] = {x_end - x_begin, y_end - y_begin, z_end - z_begin};
+		size_t scale = stoi(resolution_id);
+
+		// Create the output buffer
+		// The subvolume data for the chunk is stored directly in little-endian binary format in [x, y, z, channel]
+		// Fortran order (i.e. consecutive x values are contiguous)
+		//                          Z              Y              X             CH
+		//uint16_t out_buffer[chunk_sizes[2]][chunk_sizes[1]][chunk_sizes[0]][channel_count];
+		//uint16_t out_buffer[handler->channel_count][chunk_sizes[2]][chunk_sizes[1]][chunk_sizes[0]];
+		const size_t out_buffer_size = sizeof(uint16_t) * chunk_sizes[0] * chunk_sizes[1] * chunk_sizes[2] * reader->channel_count;
+
+		uint16_t * out_buffer = reader->load_region(
+			scale,
+			x_begin, x_end,
+			y_begin, y_end,
+			z_begin, z_end
+		);
+
+		for(const auto& pair : filters) {
+			filter_run(
+				out_buffer,
+				out_buffer_size,
+				{chunk_sizes[0], chunk_sizes[1], chunk_sizes[2]},
+				reader->channel_count,
+				pair.first,
+				pair.second
+			);
+		}
+
+		res.body = std::string((char *) out_buffer, out_buffer_size);
+		free(out_buffer);
+
+		res.end(); });
+
+	// @app.route("/data/<data_id>/<resolution>/<key>-<key>-<key>")
+	// This has to be last in the route list because it acts as a wildcard
 	CROW_ROUTE(app, "/<string>/<string>/<string>")
 	([](crow::response &res, std::string data_id, std::string resolution_id, std::string tile_key)
 	 {
