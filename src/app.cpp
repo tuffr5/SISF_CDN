@@ -1194,6 +1194,143 @@ int main(int argc, char *argv[])
     	
     	res.end(); });
 
+	// @app.route("/data/<data_id>/<resolution>/<c>,<i>,<j>,<k>/<key>-<key>-<key>")
+	CROW_ROUTE(app, "/<string>/raw_access/<string>/<string>/<string>")
+	([](crow::response &res, std::string data_id, std::string resolution_id, std::string chunk_key, std::string tile_key)
+	 {
+		std::vector<std::string> data_id_parts = str_split(data_id, '+');
+		std::vector<std::pair<std::string, std::string>> filters;
+
+		if(data_id_parts.size() == 2) {
+				std::string filter_params = data_id_parts[1];
+				std::vector<std::string> filter_keys = str_split(filter_params, '&');
+				for(auto filter_key : filter_keys) {
+					std::vector<std::string> filter_parsed = str_split(filter_key, '=');
+
+					if(filter_parsed.size() == 2) {
+						filters.push_back( {filter_parsed[0], filter_parsed[1]} );
+					} else {
+						//std::cout << "Failed to parse filter " << filter_key << std::endl;
+					}
+				}
+		} else {
+			//std::cout << "Failed to parse filterset." << std::endl;
+		}
+
+		//for (const auto& pair : filters) {
+        //	std::cout << "Key: " << pair.first << ", Value: " << pair.second << std::endl;
+    	//}
+
+		data_id = data_id_parts[0];
+		auto archive_search = archive_inventory.find(data_id);
+		if(archive_search == archive_inventory.end()) {
+			res.end();
+			return;
+		}
+
+		archive_reader * reader = archive_search->second;
+
+		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
+		// <xBegin>-<xEnd>_<yBegin>-<yEnd>_<zBegin>-<zEnd>
+		sscanf(tile_key.c_str(), "%u-%u_%u-%u_%u-%u", &x_begin, &x_end, &y_begin, &y_end, &z_begin, &z_end);
+
+		size_t chunk_sizes[3] = {x_end - x_begin, y_end - y_begin, z_end - z_begin};
+		size_t scale = stoi(resolution_id);
+		
+		unsigned int channel, chunk_i, chunk_j, chunk_k;
+		sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &chunk_i, &chunk_j, &chunk_k);
+
+		// Create the output buffer
+		// The subvolume data for the chunk is stored directly in little-endian binary format in [x, y, z, channel]
+		// Fortran order (i.e. consecutive x values are contiguous)
+		//                          Z              Y              X             CH
+		//uint16_t out_buffer[chunk_sizes[2]][chunk_sizes[1]][chunk_sizes[0]][channel_count];
+		//uint16_t out_buffer[handler->channel_count][chunk_sizes[2]][chunk_sizes[1]][chunk_sizes[0]];
+		const size_t out_buffer_size = sizeof(uint16_t) * chunk_sizes[0] * chunk_sizes[1] * chunk_sizes[2] * reader->channel_count;
+
+		//uint16_t * out_buffer = reader->load_region(
+		//	scale,
+		//	x_begin, x_end,
+		//	y_begin, y_end,
+		//	z_begin, z_end
+		//);
+
+		packed_reader * raw_reader = reader->get_mchunk(scale, channel, chunk_i, chunk_j, chunk_k);
+
+		uint16_t * out_buffer = (uint16_t*) malloc(out_buffer_size);
+
+		uint16_t * chunk = 0;
+		size_t last_sub_chunk_id = 0;
+		
+		for(size_t i = x_begin; i < x_end; i++) {
+			for(size_t j = y_begin; j < y_end; j++) {
+				for(size_t k = z_begin; k < z_end; k++) {
+					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
+
+					if(sub_chunk_id != last_sub_chunk_id) {
+						if(chunk != nullptr) {
+							free(chunk);
+						}
+						chunk = nullptr;
+					}
+
+					if(chunk == nullptr) {
+						chunk = raw_reader->load_chunk(sub_chunk_id);
+						last_sub_chunk_id = sub_chunk_id;
+					}
+
+					// Find the start/stop coordinates of this chunk
+					const size_t xmin = ((size_t) raw_reader->chunkx) * (i / ((size_t) raw_reader->chunkx));    // lower bound of mchunk
+                	const size_t xmax = std::min((size_t)xmin + raw_reader->chunkx, (size_t)raw_reader->sizex); // upper bound of mchunk
+					const size_t xsize = xmax - xmin;
+
+					const size_t ymin = ((size_t) raw_reader->chunky) * (j / ((size_t) raw_reader->chunky));
+                    const size_t ymax = std::min((size_t)ymin + raw_reader->chunky, (size_t)raw_reader->sizey);
+					const size_t ysize = ymax - ymin;
+
+					const size_t zmin = ((size_t) raw_reader->chunkz) * (k / ((size_t) raw_reader->chunkz));
+                    const size_t zmax = std::min((size_t)zmin + raw_reader->chunky, (size_t)raw_reader->sizez);
+					const size_t zsize = zmax - zmin;
+
+					const size_t x_in_chunk_offset = i - xmin;
+					const size_t y_in_chunk_offset = j - ymin;
+					const size_t z_in_chunk_offset = k - zmin;
+
+					// Calculate the coordinates of the input and output inside their respective buffers
+					const size_t coffset =  (x_in_chunk_offset * ysize * zsize) + // X
+											(y_in_chunk_offset * zsize) +         // Y
+											(z_in_chunk_offset);                  // Z
+
+					const size_t ooffset =  ((k - z_begin) * chunk_sizes[1] * chunk_sizes[0]) +  // Z
+											((j - y_begin) * chunk_sizes[0]) +                   // Y
+											(i - x_begin);                                     // X
+
+					const uint16_t v = chunk[coffset];
+					out_buffer[ooffset] = v;
+				}
+			}
+		}
+
+		if(chunk != nullptr) {
+			free(chunk);
+		}
+
+		for(const auto& pair : filters) {
+			filter_run(
+				out_buffer,
+				out_buffer_size,
+				{chunk_sizes[0], chunk_sizes[1], chunk_sizes[2]},
+				reader->channel_count,
+				pair.first,
+				pair.second
+			);
+		}
+
+		res.body = std::string((char *) out_buffer, out_buffer_size);
+		free(out_buffer);
+
+		res.end(); });
+
 	// @app.route("/data/<data_id>/<resolution>/<key>-<key>-<key>")
 	// This has to be last in the route list because it acts as a wildcard
 	CROW_ROUTE(app, "/<string>/<string>/<string>")
@@ -1220,9 +1357,9 @@ int main(int argc, char *argv[])
 			//std::cout << "Failed to parse filterset." << std::endl;
 		}
 
-		for (const auto& pair : filters) {
-        	std::cout << "Key: " << pair.first << ", Value: " << pair.second << std::endl;
-    	}
+		//for (const auto& pair : filters) {
+        //	std::cout << "Key: " << pair.first << ", Value: " << pair.second << std::endl;
+    	//}
 
 		data_id = data_id_parts[0];
 		auto archive_search = archive_inventory.find(data_id);
