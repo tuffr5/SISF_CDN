@@ -1282,25 +1282,31 @@ int main(int argc, char *argv[])
 					// Find the start/stop coordinates of this chunk
 					const size_t xmin = ((size_t) raw_reader->chunkx) * (i / ((size_t) raw_reader->chunkx));    // lower bound of mchunk
                 	const size_t xmax = std::min((size_t)xmin + raw_reader->chunkx, (size_t)raw_reader->sizex); // upper bound of mchunk
+					const size_t xsize = xmax - xmin;
+
 					const size_t ymin = ((size_t) raw_reader->chunky) * (j / ((size_t) raw_reader->chunky));
                     const size_t ymax = std::min((size_t)ymin + raw_reader->chunky, (size_t)raw_reader->sizey);
+					const size_t ysize = ymax - ymin;
+
 					const size_t zmin = ((size_t) raw_reader->chunkz) * (k / ((size_t) raw_reader->chunkz));
                     const size_t zmax = std::min((size_t)zmin + raw_reader->chunky, (size_t)raw_reader->sizez);
+					const size_t zsize = zmax - zmin;
 
 					const size_t x_in_chunk_offset = i - xmin;
 					const size_t y_in_chunk_offset = j - ymin;
 					const size_t z_in_chunk_offset = k - zmin;
 
 					// Calculate the coordinates of the input and output inside their respective buffers
-					const size_t coffset =  (x_in_chunk_offset * raw_reader->chunky * raw_reader->chunkz) + // X
-											(y_in_chunk_offset * raw_reader->chunkz) +                      // Y
-											(z_in_chunk_offset);                                            // Z
+					const size_t coffset =  (x_in_chunk_offset * ysize * zsize) + // X
+											(y_in_chunk_offset * zsize) +         // Y
+											(z_in_chunk_offset);                  // Z
 
-					const size_t ooffset =  (k * chunk_sizes[1] * chunk_sizes[2]) +  // Z
-											(j * chunk_sizes[2]) +                   // Y
+					const size_t ooffset =  (k * chunk_sizes[1] * chunk_sizes[0]) +  // Z
+											(j * chunk_sizes[0]) +                   // Y
 											(i);                                     // X
 
-					out_buffer[ooffset] = chunk[coffset];
+					const uint16_t v = chunk[coffset];
+					out_buffer[ooffset] = v;
 				}
 			}
 		}
