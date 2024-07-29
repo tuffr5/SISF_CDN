@@ -1194,7 +1194,7 @@ int main(int argc, char *argv[])
     	
     	res.end(); });
 
-	// @app.route("/data/<data_id>/<resolution>/<key>-<key>-<key>")
+	// @app.route("/data/<data_id>/<resolution>/<c>,<i>,<j>,<k>/<key>-<key>-<key>")
 	CROW_ROUTE(app, "/<string>/raw_access/<string>/<string>/<string>")
 	([](crow::response &res, std::string data_id, std::string resolution_id, std::string chunk_key, std::string tile_key)
 	 {
@@ -1262,6 +1262,7 @@ int main(int argc, char *argv[])
 		for(size_t i = 0; i = x_begin; i++) {
 			for(size_t j = 0; j = y_begin; j++) {
 				for(size_t k = 0; k = z_begin; k++) {
+					std::cout << i << ' ' << j << ' ' << k << std::endl; 
 					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
 
 					uint16_t *chunk = raw_reader->load_chunk(sub_chunk_id);
