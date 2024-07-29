@@ -1257,19 +1257,60 @@ int main(int argc, char *argv[])
 
 		packed_reader * raw_reader = reader->get_mchunk(scale, channel, chunk_i, chunk_j, chunk_k);
 
-		// for(const auto& pair : filters) {
-		// 	filter_run(
-		// 		out_buffer,
-		// 		out_buffer_size,
-		// 		{chunk_sizes[0], chunk_sizes[1], chunk_sizes[2]},
-		// 		reader->channel_count,
-		// 		pair.first,
-		// 		pair.second
-		// 	);
-		// }
+		uint16_t * out_buffer = (uint16_t*) malloc(out_buffer_size);
+		
+		for(size_t i = 0; i = x_begin; i++) {
+			for(size_t j = 0; j = y_begin; j++) {
+				for(size_t k = 0; k = z_begin; k++) {
+					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
 
-		//res.body = std::string((char *) out_buffer, out_buffer_size);
-		//free(out_buffer);
+					uint16_t *chunk = raw_reader->load_chunk(sub_chunk_id);
+
+					// Find the start/stop coordinates of this chunk
+					//size_t cxmax = std::min((size_t)cxmin + raw_reader->chunkx, (size_t)raw_reader->sizex); // Maximum value of the chunk
+					//size_t cymax = std::min((size_t)cymin + raw_reader->chunky, (size_t)raw_reader->sizey);
+					//size_t czmax = std::min((size_t)czmin + raw_reader->chunkz, (size_t)raw_reader->sizez);
+
+					const size_t xmin = ((size_t) raw_reader->chunkx) * (i / ((size_t) raw_reader->chunkx));                             // lower bound of mchunk
+                	const size_t xmax = std::min((size_t)xmin + raw_reader->chunkx, (size_t)raw_reader->sizex); // upper bound of mchunk
+					const size_t ymin = ((size_t) raw_reader->chunky) * (j / ((size_t) raw_reader->chunky));   
+                    const size_t ymax = std::min((size_t)ymin + raw_reader->chunky, (size_t)raw_reader->sizey);
+					const size_t zmin = ((size_t) raw_reader->chunkz) * (k / ((size_t) raw_reader->chunkz));   
+                    const size_t zmax = std::min((size_t)zmin + raw_reader->chunky, (size_t)raw_reader->sizez);
+
+					const size_t x_in_chunk_offset = i - xmin;
+					const size_t y_in_chunk_offset = j - ymin;
+					const size_t z_in_chunk_offset = k - zmin;
+
+					// Calculate the coordinates of the input and output inside their respective buffers
+					const size_t coffset =  (x_in_chunk_offset * raw_reader->chunky * raw_reader->chunkz) + // X
+											(y_in_chunk_offset * raw_reader->chunkz) +                      // Y
+											(z_in_chunk_offset);                                            // Z
+
+					const size_t ooffset =  (k * chunk_sizes[1] * chunk_sizes[2]) +  // Z
+											(j * chunk_sizes[2]) +                   // Y
+											(i);                                     // X
+
+					out_buffer[ooffset] = chunk[coffset];
+
+					free(chunk);
+				}
+			}
+		}
+
+		for(const auto& pair : filters) {
+			filter_run(
+				out_buffer,
+				out_buffer_size,
+				{chunk_sizes[0], chunk_sizes[1], chunk_sizes[2]},
+				reader->channel_count,
+				pair.first,
+				pair.second
+			);
+		}
+
+		res.body = std::string((char *) out_buffer, out_buffer_size);
+		free(out_buffer);
 
 		res.end(); });
 
