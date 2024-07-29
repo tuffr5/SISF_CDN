@@ -1259,8 +1259,8 @@ int main(int argc, char *argv[])
 
 		uint16_t * out_buffer = (uint16_t*) malloc(out_buffer_size);
 		
-		for(size_t i = x_begin; i = x_end; i++) {
-			for(size_t j = y_begin; j = y_end; j++) {
+		for(size_t i = x_begin; i < x_end; i++) {
+			for(size_t j = y_begin; j < y_end; j++) {
 				for(size_t k = z_begin; k = z_end; k++) {
 					std::cout << i << ' ' << j << ' ' << k << std::endl; 
 					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
