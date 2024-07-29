@@ -1258,25 +1258,29 @@ int main(int argc, char *argv[])
 		packed_reader * raw_reader = reader->get_mchunk(scale, channel, chunk_i, chunk_j, chunk_k);
 
 		uint16_t * out_buffer = (uint16_t*) malloc(out_buffer_size);
+
+		uint16_t * chunk = 0;
+		size_t last_sub_chunk_id = 0;
 		
 		for(size_t i = x_begin; i < x_end; i++) {
 			for(size_t j = y_begin; j < y_end; j++) {
 				for(size_t k = z_begin; k < z_end; k++) {
-					std::cout << i << ' ' << j << ' ' << k << std::endl; 
 					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
 
-					uint16_t *chunk = raw_reader->load_chunk(sub_chunk_id);
+					if(chunk == 0 || sub_chunk_id != last_sub_chunk_id) {
+						if(chunk != 0) {
+							free(chunk);
+						}
+						chunk = raw_reader->load_chunk(sub_chunk_id);
+						last_sub_chunk_id = sub_chunk_id;
+					}
 
 					// Find the start/stop coordinates of this chunk
-					//size_t cxmax = std::min((size_t)cxmin + raw_reader->chunkx, (size_t)raw_reader->sizex); // Maximum value of the chunk
-					//size_t cymax = std::min((size_t)cymin + raw_reader->chunky, (size_t)raw_reader->sizey);
-					//size_t czmax = std::min((size_t)czmin + raw_reader->chunkz, (size_t)raw_reader->sizez);
-
-					const size_t xmin = ((size_t) raw_reader->chunkx) * (i / ((size_t) raw_reader->chunkx));                             // lower bound of mchunk
+					const size_t xmin = ((size_t) raw_reader->chunkx) * (i / ((size_t) raw_reader->chunkx));    // lower bound of mchunk
                 	const size_t xmax = std::min((size_t)xmin + raw_reader->chunkx, (size_t)raw_reader->sizex); // upper bound of mchunk
-					const size_t ymin = ((size_t) raw_reader->chunky) * (j / ((size_t) raw_reader->chunky));   
+					const size_t ymin = ((size_t) raw_reader->chunky) * (j / ((size_t) raw_reader->chunky));
                     const size_t ymax = std::min((size_t)ymin + raw_reader->chunky, (size_t)raw_reader->sizey);
-					const size_t zmin = ((size_t) raw_reader->chunkz) * (k / ((size_t) raw_reader->chunkz));   
+					const size_t zmin = ((size_t) raw_reader->chunkz) * (k / ((size_t) raw_reader->chunkz));
                     const size_t zmax = std::min((size_t)zmin + raw_reader->chunky, (size_t)raw_reader->sizez);
 
 					const size_t x_in_chunk_offset = i - xmin;
@@ -1293,10 +1297,12 @@ int main(int argc, char *argv[])
 											(i);                                     // X
 
 					out_buffer[ooffset] = chunk[coffset];
-
-					free(chunk);
 				}
 			}
+		}
+
+		if(chunk != 0) {
+			free(chunk);
 		}
 
 		for(const auto& pair : filters) {
