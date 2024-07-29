@@ -1257,19 +1257,19 @@ int main(int argc, char *argv[])
 
 		packed_reader * raw_reader = reader->get_mchunk(scale, channel, chunk_i, chunk_j, chunk_k);
 
-		for(const auto& pair : filters) {
-			filter_run(
-				out_buffer,
-				out_buffer_size,
-				{chunk_sizes[0], chunk_sizes[1], chunk_sizes[2]},
-				reader->channel_count,
-				pair.first,
-				pair.second
-			);
-		}
+		// for(const auto& pair : filters) {
+		// 	filter_run(
+		// 		out_buffer,
+		// 		out_buffer_size,
+		// 		{chunk_sizes[0], chunk_sizes[1], chunk_sizes[2]},
+		// 		reader->channel_count,
+		// 		pair.first,
+		// 		pair.second
+		// 	);
+		// }
 
 		//res.body = std::string((char *) out_buffer, out_buffer_size);
-		free(out_buffer);
+		//free(out_buffer);
 
 		res.end(); });
 
