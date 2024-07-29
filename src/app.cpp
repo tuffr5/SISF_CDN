@@ -1267,10 +1267,14 @@ int main(int argc, char *argv[])
 				for(size_t k = z_begin; k < z_end; k++) {
 					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
 
-					if(chunk == 0 || sub_chunk_id != last_sub_chunk_id) {
-						if(chunk != 0) {
+					if(sub_chunk_id != last_sub_chunk_id) {
+						if(chunk != nullptr) {
 							free(chunk);
 						}
+						chunk = nullptr;
+					}
+
+					if(chunk == nullptr) {
 						chunk = raw_reader->load_chunk(sub_chunk_id);
 						last_sub_chunk_id = sub_chunk_id;
 					}
@@ -1301,7 +1305,7 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		if(chunk != 0) {
+		if(chunk != nullptr) {
 			free(chunk);
 		}
 
