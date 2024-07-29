@@ -1301,9 +1301,9 @@ int main(int argc, char *argv[])
 											(y_in_chunk_offset * zsize) +         // Y
 											(z_in_chunk_offset);                  // Z
 
-					const size_t ooffset =  (k * chunk_sizes[1] * chunk_sizes[0]) +  // Z
-											(j * chunk_sizes[0]) +                   // Y
-											(i);                                     // X
+					const size_t ooffset =  ((k - z_begin) * chunk_sizes[1] * chunk_sizes[0]) +  // Z
+											((j - y_begin) * chunk_sizes[0]) +                   // Y
+											(i - x_begin);                                     // X
 
 					const uint16_t v = chunk[coffset];
 					out_buffer[ooffset] = v;
