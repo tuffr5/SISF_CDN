@@ -1390,8 +1390,6 @@ int main(int argc, char *argv[])
 
 					const uint16_t v = chunk[coffset];
 					out_buffer[ooffset] = v;
-
-					free(chunk);
 				}
 			}
 		}
