@@ -1213,9 +1213,10 @@ int main(int argc, char *argv[])
 
 		archive_reader * reader = archive_search->second;
 
-		if(channel >= reader->channel_count) {
-			res.code = 404;
-			res.end(); 
+		if (channel >= reader->channel_count || chunk_i >= reader->mcountx || chunk_j >= reader->mcounty || chunk_k >= reader->mcountz)
+		{
+			res.code = 400;
+			res.end();
 			return;
 		}
 
@@ -1321,9 +1322,10 @@ int main(int argc, char *argv[])
 		unsigned int channel, chunk_i, chunk_j, chunk_k;
 		sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &chunk_i, &chunk_j, &chunk_k);
 
-		if(channel >= reader->channel_count) {
-			res.code = 404;
-			res.end(); 
+		if (channel >= reader->channel_count || chunk_i >= reader->mcountx || chunk_j >= reader->mcounty || chunk_k >= reader->mcountz)
+		{
+			res.code = 400;
+			res.end();
 			return;
 		}
 
