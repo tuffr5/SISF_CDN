@@ -1211,13 +1211,13 @@ int main(int argc, char *argv[])
 		unsigned int channel, chunk_i, chunk_j, chunk_k;
 		sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &chunk_i, &chunk_j, &chunk_k);
 
+		archive_reader * reader = archive_search->second;
+
 		if(channel >= reader->channel_count) {
 			res.code = 404;
 			res.end(); 
 			return;
 		}
-
-		archive_reader * reader = archive_search->second;
 
 		std::vector<basic_json> scales;
 		for(size_t scale : reader->scales) {
