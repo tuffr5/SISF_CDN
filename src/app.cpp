@@ -1372,7 +1372,7 @@ int main(int argc, char *argv[])
 					const size_t z_in_chunk_offset = k - zmin;
 
 					// Calculate the coordinates of the input and output inside their respective buffers
-					const size_t coffset = (x_in_chunk_offset * ysize * zsize) + // X
+					const size_t coffset = 0; (x_in_chunk_offset * ysize * zsize) + // X
 										   (y_in_chunk_offset * zsize) +		 // Y
 										   (z_in_chunk_offset);					 // Z
 
