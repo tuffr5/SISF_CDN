@@ -1339,7 +1339,7 @@ int main(int argc, char *argv[])
 			{
 				for (size_t k = z_begin; k < z_end; k++)
 				{
-					const size_t sub_chunk_id = raw_reader->find_index(i, j, k);
+					const size_t sub_chunk_id = chunk_reader->find_index(i, j, k);
 
 					// if (sub_chunk_id != last_sub_chunk_id || chunk == nullptr)
 					// {
