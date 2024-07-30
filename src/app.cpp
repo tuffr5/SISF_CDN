@@ -9,6 +9,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <cstdint>
 
 #include <iostream>
@@ -407,7 +409,7 @@ int main(int argc, char *argv[])
 
 		return out.str(); });
 
-	//	CROW_ROUTE(app, "/data/<string>/info")
+	//	ENDPOINT: /data/<string>/info
 	CROW_ROUTE(app, "/<string>/info")
 	([](crow::response &res, std::string data_id)
 	 {
@@ -1194,9 +1196,89 @@ int main(int argc, char *argv[])
     	
     	res.end(); });
 
-	// @app.route("/data/<data_id>/<resolution>/<c>,<i>,<j>,<k>/<key>-<key>-<key>")
+	//	ENDPOINT: /<string>/raw_access/<c>,<i>,<j>,<k>/info
+	CROW_ROUTE(app, "/<string>/raw_access/<string>/info")
+	([](crow::response &res, std::string data_id, std::string chunk_key)
+	 {
+		data_id = str_first(data_id, '+');
+		auto archive_search = archive_inventory.find(data_id);
+
+		if(archive_search == archive_inventory.end()) {
+			res.end("File not found.");
+			return;
+		}
+
+		unsigned int channel, chunk_i, chunk_j, chunk_k;
+		sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &chunk_i, &chunk_j, &chunk_k);
+
+		archive_reader * reader = archive_search->second;
+
+		if (channel >= reader->channel_count || chunk_i >= reader->mcountx || chunk_j >= reader->mcounty || chunk_k >= reader->mcountz)
+		{
+			res.code = 400;
+			res.end();
+			return;
+		}
+
+		std::vector<basic_json> scales;
+		for(size_t scale : reader->scales) {
+			std::tuple<size_t, size_t, size_t> res_scaled = reader->get_res(scale);
+			std::vector<uint32_t> res = {
+				(uint32_t) std::get<0>(res_scaled),
+				(uint32_t) std::get<1>(res_scaled),
+				(uint32_t) std::get<2>(res_scaled)
+			};
+
+			basic_json to_add;
+			to_add["chunk_sizes"] = {
+				//{64, 1, 1},
+				//{1, 64, 1},
+				//{1, 1, 64}
+				{256, 256, 1  },
+				{256, 1,   256},
+				{1,   256, 256},
+				{32, 32, 32},
+
+			};
+
+			to_add["encoding"] = "raw";
+			to_add["key"] = std::to_string(scale);
+			to_add["resolution"] = res;
+
+			//std::tuple<size_t, size_t, size_t> sizes = reader->get_size(scale);
+			//to_add["size"] = {
+			//	std::get<0>(sizes),
+			//	std::get<1>(sizes),
+			//	std::get<2>(sizes)
+			//};
+
+			packed_reader * raw_reader = reader->get_mchunk(scale, channel, chunk_i, chunk_j, chunk_k);
+
+			to_add["size"] = {
+				raw_reader->sizex,
+				raw_reader->sizey,
+				raw_reader->sizez
+			};
+
+			to_add["voxel_offset"] = {0,0,0};
+
+			scales.push_back(to_add);
+		}
+
+		json response = {
+			{"type", "image"},
+			{"@type", "neuroglancer_multiscale_volume"},
+			{"data_type", "uint16"}, // TODO change based on dtype
+			{"num_channels", reader->channel_count}
+		};
+		response["scales"] = scales;
+
+		res.write(response.dump());
+    	res.end(); });
+
+	// ENDPOINT: /<data_id>/raw_access/<c>,<i>,<j>,<k>/<resolution>/<key>-<key>-<key>
 	CROW_ROUTE(app, "/<string>/raw_access/<string>/<string>/<string>")
-	([](crow::response &res, std::string data_id, std::string resolution_id, std::string chunk_key, std::string tile_key)
+	([](crow::response &res, std::string data_id, std::string chunk_key, std::string resolution_id, std::string tile_key)
 	 {
 		std::vector<std::string> data_id_parts = str_split(data_id, '+');
 		std::vector<std::pair<std::string, std::string>> filters;
@@ -1240,6 +1322,14 @@ int main(int argc, char *argv[])
 		unsigned int channel, chunk_i, chunk_j, chunk_k;
 		sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &chunk_i, &chunk_j, &chunk_k);
 
+		if (channel >= reader->channel_count || chunk_i >= reader->mcountx || chunk_j >= reader->mcounty || chunk_k >= reader->mcountz)
+		{
+			res.code = 400;
+			res.end();
+			return;
+		}
+
+
 		// Create the output buffer
 		// The subvolume data for the chunk is stored directly in little-endian binary format in [x, y, z, channel]
 		// Fortran order (i.e. consecutive x values are contiguous)
@@ -1248,62 +1338,69 @@ int main(int argc, char *argv[])
 		//uint16_t out_buffer[handler->channel_count][chunk_sizes[2]][chunk_sizes[1]][chunk_sizes[0]];
 		const size_t out_buffer_size = sizeof(uint16_t) * chunk_sizes[0] * chunk_sizes[1] * chunk_sizes[2] * reader->channel_count;
 
-		//uint16_t * out_buffer = reader->load_region(
-		//	scale,
-		//	x_begin, x_end,
-		//	y_begin, y_end,
-		//	z_begin, z_end
-		//);
-
-		packed_reader * raw_reader = reader->get_mchunk(scale, channel, chunk_i, chunk_j, chunk_k);
+		packed_reader * chunk_reader = reader->get_mchunk(scale, channel, chunk_i, chunk_j, chunk_k);
 
 		uint16_t * out_buffer = (uint16_t*) malloc(out_buffer_size);
 
-		uint16_t * chunk = 0;
-		size_t last_sub_chunk_id = 0;
-		
-		for(size_t i = x_begin; i < x_end; i++) {
-			for(size_t j = y_begin; j < y_end; j++) {
-				for(size_t k = z_begin; k < z_end; k++) {
-					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
+		uint16_t * chunk = nullptr;
+		size_t last_sub_chunk_id = SIZE_MAX;
 
-					if(sub_chunk_id != last_sub_chunk_id) {
-						if(chunk != nullptr) {
-							free(chunk);
+		std::map<size_t, uint16_t *> chunk_cache;
+
+		const size_t sx = chunk_reader->sizex;
+		const size_t sy = chunk_reader->sizey;
+		const size_t sz = chunk_reader->sizez;
+
+		const size_t mchunkx = chunk_reader->chunkx;
+		const size_t mchunky = chunk_reader->chunky;
+		const size_t mchunkz = chunk_reader->chunkz;
+
+		for (size_t i = x_begin; i < x_end; i++)
+		{
+			// Find the start/stop coordinates of this chunk
+			const size_t xmin = mchunkx * (i / mchunkx);			  // lower bound of mchunk
+			const size_t xmax = std::min((size_t)xmin + mchunkx, sx); // upper bound of mchunk
+			const size_t xsize = xmax - xmin;
+
+			for (size_t j = y_begin; j < y_end; j++)
+			{
+				const size_t ymin = mchunky * (j / mchunky);
+				const size_t ymax = std::min(ymin + mchunky, sy);
+				const size_t ysize = ymax - ymin;
+
+				for (size_t k = z_begin; k < z_end; k++)
+				{
+					const size_t zmin = mchunkz * (k / mchunkz);
+					const size_t zmax = std::min(zmin + mchunkz, sz);
+					const size_t zsize = zmax - zmin;
+
+					const size_t sub_chunk_id = chunk_reader->find_index(i, j, k);
+
+					if (sub_chunk_id != last_sub_chunk_id || chunk == nullptr)
+					{
+						chunk = chunk_cache[sub_chunk_id];
+
+						if (chunk == 0)
+						{
+							chunk = chunk_reader->load_chunk(sub_chunk_id);
+							chunk_cache[sub_chunk_id] = chunk;
 						}
-						chunk = nullptr;
-					}
 
-					if(chunk == nullptr) {
-						chunk = raw_reader->load_chunk(sub_chunk_id);
 						last_sub_chunk_id = sub_chunk_id;
 					}
-
-					// Find the start/stop coordinates of this chunk
-					const size_t xmin = ((size_t) raw_reader->chunkx) * (i / ((size_t) raw_reader->chunkx));    // lower bound of mchunk
-                	const size_t xmax = std::min((size_t)xmin + raw_reader->chunkx, (size_t)raw_reader->sizex); // upper bound of mchunk
-					const size_t xsize = xmax - xmin;
-
-					const size_t ymin = ((size_t) raw_reader->chunky) * (j / ((size_t) raw_reader->chunky));
-                    const size_t ymax = std::min((size_t)ymin + raw_reader->chunky, (size_t)raw_reader->sizey);
-					const size_t ysize = ymax - ymin;
-
-					const size_t zmin = ((size_t) raw_reader->chunkz) * (k / ((size_t) raw_reader->chunkz));
-                    const size_t zmax = std::min((size_t)zmin + raw_reader->chunky, (size_t)raw_reader->sizez);
-					const size_t zsize = zmax - zmin;
 
 					const size_t x_in_chunk_offset = i - xmin;
 					const size_t y_in_chunk_offset = j - ymin;
 					const size_t z_in_chunk_offset = k - zmin;
 
 					// Calculate the coordinates of the input and output inside their respective buffers
-					const size_t coffset =  (x_in_chunk_offset * ysize * zsize) + // X
-											(y_in_chunk_offset * zsize) +         // Y
-											(z_in_chunk_offset);                  // Z
+					const size_t coffset = (x_in_chunk_offset * ysize * zsize) + // X
+										   (y_in_chunk_offset * zsize) +		 // Y
+										   (z_in_chunk_offset);					 // Z
 
-					const size_t ooffset =  ((k - z_begin) * chunk_sizes[1] * chunk_sizes[0]) +  // Z
-											((j - y_begin) * chunk_sizes[0]) +                   // Y
-											(i - x_begin);                                     // X
+					const size_t ooffset = ((k - z_begin) * chunk_sizes[1] * chunk_sizes[0]) + // Z
+										   ((j - y_begin) * chunk_sizes[0]) +				   // Y
+										   (i - x_begin);									   // X
 
 					const uint16_t v = chunk[coffset];
 					out_buffer[ooffset] = v;
@@ -1311,9 +1408,10 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		if(chunk != nullptr) {
-			free(chunk);
-		}
+		for (auto it = chunk_cache.begin(); it != chunk_cache.end(); it++)
+        {
+            free(it->second);
+        }
 
 		for(const auto& pair : filters) {
 			filter_run(
