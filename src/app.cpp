@@ -1330,6 +1330,8 @@ int main(int argc, char *argv[])
 		uint16_t * chunk = nullptr;
 		size_t last_sub_chunk_id = SIZE_MAX;
 
+		std::map<size_t, uint16_t> chunk_map;
+
 		for (size_t i = x_begin; i < x_end; i++)
 		{
 			for (size_t j = y_begin; j < y_end; j++)
@@ -1338,19 +1340,11 @@ int main(int argc, char *argv[])
 				{
 					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
 
-					if (sub_chunk_id != last_sub_chunk_id)
-					{
-						if (chunk != nullptr)
-						{
-							free(chunk);
-						}
-						chunk = nullptr;
-					}
+					chunk = chunk_map[sub_chunk_id];
 
-					if (chunk == nullptr)
-					{
+					if(chunk == 0) {
 						chunk = raw_reader->load_chunk(sub_chunk_id);
-						last_sub_chunk_id = sub_chunk_id;
+						chunk_map[sub_chunk_id] = chunk;
 					}
 
 					// Find the start/stop coordinates of this chunk
@@ -1379,14 +1373,13 @@ int main(int argc, char *argv[])
 										   ((j - y_begin) * chunk_sizes[0]) +				   // Y
 										   (i - x_begin);									   // X
 
-					const uint16_t v = chunk[coffset];
-					out_buffer[ooffset] = v;
+					out_buffer[ooffset] = chunk[coffset];
 				}
 			}
 		}
 
-		if(chunk != nullptr) {
-			free(chunk);
+		for(auto a : chunk_map) {
+			free(a.second);
 		}
 
 		for(const auto& pair : filters) {
