@@ -1332,6 +1332,7 @@ int main(int argc, char *argv[])
 
 		std::map<size_t, uint16_t *> chunk_cache;
 
+/*
 		for (size_t i = x_begin; i < x_end; i++)
 		{
 			for (size_t j = y_begin; j < y_end; j++)
@@ -1385,7 +1386,7 @@ int main(int argc, char *argv[])
 					free(chunk);
 				}
 			}
-		}
+		}*/
 
 		for (auto it = chunk_cache.begin(); it != chunk_cache.end(); it++)
         {
