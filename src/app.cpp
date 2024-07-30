@@ -1330,7 +1330,7 @@ int main(int argc, char *argv[])
 		uint16_t * chunk = nullptr;
 		size_t last_sub_chunk_id = SIZE_MAX;
 
-		std::map<size_t, uint16_t *> chunk_map;
+		std::map<size_t, uint16_t *> chunk_cache;
 
 		for (size_t i = x_begin; i < x_end; i++)
 		{
@@ -1338,20 +1338,20 @@ int main(int argc, char *argv[])
 			{
 				for (size_t k = z_begin; k < z_end; k++)
 				{
-					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
+					const size_t sub_chunk_id = raw_reader->find_index(i, j, k);
 
-					if (sub_chunk_id != last_sub_chunk_id || chunk == nullptr)
-					{
-						chunk = chunk_map[sub_chunk_id];
+					// if (sub_chunk_id != last_sub_chunk_id || chunk == nullptr)
+					// {
+					// 	chunk = chunk_cache[sub_chunk_id];
 
-						if (chunk == 0)
-						{
+					// 	if (chunk == 0)
+					// 	{
 							chunk = raw_reader->load_chunk(sub_chunk_id);
-							chunk_map[sub_chunk_id] = chunk;
-						}
+					// 		chunk_cache[sub_chunk_id] = chunk;
+					// 	}
 
-						last_sub_chunk_id = sub_chunk_id;
-					}
+					// 	last_sub_chunk_id = sub_chunk_id;
+					// }
 
 					// Find the start/stop coordinates of this chunk
 					const size_t xmin = ((size_t)raw_reader->chunkx) * (i / ((size_t)raw_reader->chunkx));		// lower bound of mchunk
@@ -1381,13 +1381,16 @@ int main(int argc, char *argv[])
 
 					const uint16_t v = chunk[coffset];
 					out_buffer[ooffset] = v;
+
+					free(chunk);
 				}
 			}
 		}
 
-		for(auto a : chunk_map) {
-			free(a.second);
-		}
+		for (auto it = chunk_cache.begin(); it != chunk_cache.end(); it++)
+        {
+            free(it->second);
+        }
 
 		for(const auto& pair : filters) {
 			filter_run(
