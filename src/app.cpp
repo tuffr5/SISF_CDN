@@ -1315,6 +1315,13 @@ int main(int argc, char *argv[])
 		unsigned int channel, chunk_i, chunk_j, chunk_k;
 		sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &chunk_i, &chunk_j, &chunk_k);
 
+		if(channel >= reader->channel_count) {
+			res.code = 404;
+			res.end(); 
+			return;
+		}
+
+
 		// Create the output buffer
 		// The subvolume data for the chunk is stored directly in little-endian binary format in [x, y, z, channel]
 		// Fortran order (i.e. consecutive x values are contiguous)
