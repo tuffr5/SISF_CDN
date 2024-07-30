@@ -1332,20 +1332,40 @@ int main(int argc, char *argv[])
 
 		std::map<size_t, uint16_t *> chunk_cache;
 
+		const size_t sx = chunk_reader->sizex;
+		const size_t sy = chunk_reader->sizey;
+		const size_t sz = chunk_reader->sizez;
+
+		const size_t mchunkx = chunk_reader->chunkx;
+		const size_t mchunky = chunk_reader->chunky;
+		const size_t mchunkz = chunk_reader->chunkz;
 
 		for (size_t i = x_begin; i < x_end; i++)
 		{
+			// Find the start/stop coordinates of this chunk
+			const size_t xmin = mchunkx * (i / mchunkx);			  // lower bound of mchunk
+			const size_t xmax = std::min((size_t)xmin + mchunkx, sx); // upper bound of mchunk
+			const size_t xsize = xmax - xmin;
+
 			for (size_t j = y_begin; j < y_end; j++)
 			{
+				const size_t ymin = mchunky * (j / mchunky);
+				const size_t ymax = std::min(ymin + mchunky, sy);
+				const size_t ysize = ymax - ymin;
+
 				for (size_t k = z_begin; k < z_end; k++)
 				{
+					const size_t zmin = mchunkz * (k / mchunkz);
+					const size_t zmax = std::min(zmin + mchunkz, sz);
+					const size_t zsize = zmax - zmin;
+
 					const size_t sub_chunk_id = chunk_reader->find_index(i, j, k);
 
 					if (sub_chunk_id != last_sub_chunk_id || chunk == nullptr)
 					{
-					 	chunk = chunk_cache[sub_chunk_id];
+						chunk = chunk_cache[sub_chunk_id];
 
-					 	if (chunk == 0)
+						if (chunk == 0)
 						{
 							chunk = chunk_reader->load_chunk(sub_chunk_id);
 							chunk_cache[sub_chunk_id] = chunk;
@@ -1353,27 +1373,6 @@ int main(int argc, char *argv[])
 
 						last_sub_chunk_id = sub_chunk_id;
 					}
-
-					const size_t mchunkx = chunk_reader->chunkx;
-					const size_t mchunky = chunk_reader->chunky;
-					const size_t mchunkz = chunk_reader->chunkz;
-
-					const size_t sx = chunk_reader->sizex;
-					const size_t sy = chunk_reader->sizey;
-					const size_t sz = chunk_reader->sizez;
-
-					// Find the start/stop coordinates of this chunk
-					const size_t xmin = mchunkx * (i / mchunkx);		// lower bound of mchunk
-					const size_t xmax = std::min((size_t)xmin + mchunkx, sx); // upper bound of mchunk
-					const size_t xsize = xmax - xmin;
-
-					const size_t ymin = mchunky * (j / mchunky);
-					const size_t ymax = std::min(ymin + mchunky, sy);
-					const size_t ysize = ymax - ymin;
-
-					const size_t zmin = mchunkz * (k / mchunkz);
-					const size_t zmax = std::min(zmin + mchunkz, sz);
-					const size_t zsize = zmax - zmin;
 
 					const size_t x_in_chunk_offset = i - xmin;
 					const size_t y_in_chunk_offset = j - ymin;
