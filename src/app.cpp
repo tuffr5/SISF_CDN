@@ -1333,17 +1333,17 @@ int main(int argc, char *argv[])
 				for(size_t k = z_begin; k < z_end; k++) {
 					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
 
-					if(sub_chunk_id != last_sub_chunk_id) {
-						if(chunk != nullptr) {
-							free(chunk);
-						}
-						chunk = nullptr;
-					}
+					// if(sub_chunk_id != last_sub_chunk_id) {
+					// 	if(chunk != nullptr) {
+					// 		free(chunk);
+					// 	}
+					// 	chunk = nullptr;
+					// }
 
-					if(chunk == nullptr) {
-						chunk = raw_reader->load_chunk(sub_chunk_id);
-						last_sub_chunk_id = sub_chunk_id;
-					}
+					// if(chunk == nullptr) {
+					 	chunk = raw_reader->load_chunk(sub_chunk_id);
+					// 	last_sub_chunk_id = sub_chunk_id;
+					// }
 
 					// Find the start/stop coordinates of this chunk
 					const size_t xmin = ((size_t) raw_reader->chunkx) * (i / ((size_t) raw_reader->chunkx));    // lower bound of mchunk
