@@ -407,7 +407,7 @@ int main(int argc, char *argv[])
 
 		return out.str(); });
 
-	//	CROW_ROUTE(app, "/data/<string>/info")
+	//	ENDPOINT: /data/<string>/info
 	CROW_ROUTE(app, "/<string>/info")
 	([](crow::response &res, std::string data_id)
 	 {
@@ -1194,9 +1194,70 @@ int main(int argc, char *argv[])
     	
     	res.end(); });
 
-	// @app.route("/data/<data_id>/<resolution>/<c>,<i>,<j>,<k>/<key>-<key>-<key>")
+	//	ENDPOINT: /<string>/raw_access/info
+	CROW_ROUTE(app, "/<string>/raw_access/info")
+	([](crow::response &res, std::string data_id)
+	 {
+		data_id = str_first(data_id, '+');
+		auto archive_search = archive_inventory.find(data_id);
+
+		if(archive_search == archive_inventory.end()) {
+			res.end("File not found.");
+			return;
+		}
+
+		archive_reader * reader = archive_search->second;
+
+		std::vector<basic_json> scales;
+		for(size_t scale : reader->scales) {
+			std::tuple<size_t, size_t, size_t> res_scaled = reader->get_res(scale);
+			std::vector<uint32_t> res = {
+				(uint32_t) std::get<0>(res_scaled),
+				(uint32_t) std::get<1>(res_scaled),
+				(uint32_t) std::get<2>(res_scaled)
+			};
+
+			basic_json to_add;
+			to_add["chunk_sizes"] = {
+				//{64, 1, 1},
+				//{1, 64, 1},
+				//{1, 1, 64}
+				{256, 256, 1  },
+				{256, 1,   256},
+				{1,   256, 256},
+				{32, 32, 32},
+
+			};
+
+			to_add["encoding"] = "raw";
+			to_add["key"] = std::to_string(scale);
+			to_add["resolution"] = res;
+
+			std::tuple<size_t, size_t, size_t> sizes = reader->get_size(scale);
+			to_add["size"] = {
+				std::get<0>(sizes),
+				std::get<1>(sizes),
+				std::get<2>(sizes)
+			};
+			to_add["voxel_offset"] = {0,0,0};
+
+			scales.push_back(to_add);
+		}
+
+		json response = {
+			{"type", "image"},
+			{"@type", "neuroglancer_multiscale_volume"},
+			{"data_type", "uint16"}, // TODO change based on dtype
+			{"num_channels", reader->channel_count}
+		};
+		response["scales"] = scales;
+
+		res.write(response.dump());
+    	res.end(); });
+
+	// ENDPOINT: /<data_id>/raw_access/<c>,<i>,<j>,<k>/<resolution>/<key>-<key>-<key>
 	CROW_ROUTE(app, "/<string>/raw_access/<string>/<string>/<string>")
-	([](crow::response &res, std::string data_id, std::string resolution_id, std::string chunk_key, std::string tile_key)
+	([](crow::response &res, std::string data_id, std::string chunk_key, std::string resolution_id, std::string tile_key)
 	 {
 		std::vector<std::string> data_id_parts = str_split(data_id, '+');
 		std::vector<std::pair<std::string, std::string>> filters;
@@ -1247,13 +1308,6 @@ int main(int argc, char *argv[])
 		//uint16_t out_buffer[chunk_sizes[2]][chunk_sizes[1]][chunk_sizes[0]][channel_count];
 		//uint16_t out_buffer[handler->channel_count][chunk_sizes[2]][chunk_sizes[1]][chunk_sizes[0]];
 		const size_t out_buffer_size = sizeof(uint16_t) * chunk_sizes[0] * chunk_sizes[1] * chunk_sizes[2] * reader->channel_count;
-
-		//uint16_t * out_buffer = reader->load_region(
-		//	scale,
-		//	x_begin, x_end,
-		//	y_begin, y_end,
-		//	z_begin, z_end
-		//);
 
 		packed_reader * raw_reader = reader->get_mchunk(scale, channel, chunk_i, chunk_j, chunk_k);
 
