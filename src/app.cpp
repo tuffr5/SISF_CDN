@@ -1194,8 +1194,8 @@ int main(int argc, char *argv[])
     	
     	res.end(); });
 
-	//	ENDPOINT: /<string>/raw_access/info
-	CROW_ROUTE(app, "/<string>/raw_access/info")
+	//	ENDPOINT: /<string>/raw_access/<c>,<i>,<j>,<k>/info
+	CROW_ROUTE(app, "/<string>/raw_access/<string>/info")
 	([](crow::response &res, std::string data_id)
 	 {
 		data_id = str_first(data_id, '+');
@@ -1205,6 +1205,9 @@ int main(int argc, char *argv[])
 			res.end("File not found.");
 			return;
 		}
+
+		unsigned int channel, chunk_i, chunk_j, chunk_k;
+		sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &chunk_i, &chunk_j, &chunk_k);
 
 		archive_reader * reader = archive_search->second;
 
@@ -1233,12 +1236,21 @@ int main(int argc, char *argv[])
 			to_add["key"] = std::to_string(scale);
 			to_add["resolution"] = res;
 
-			std::tuple<size_t, size_t, size_t> sizes = reader->get_size(scale);
+			//std::tuple<size_t, size_t, size_t> sizes = reader->get_size(scale);
+			//to_add["size"] = {
+			//	std::get<0>(sizes),
+			//	std::get<1>(sizes),
+			//	std::get<2>(sizes)
+			//};
+
+			packed_reader * raw_reader = reader->get_mchunk(scale, channel, chunk_i, chunk_j, chunk_k);
+
 			to_add["size"] = {
-				std::get<0>(sizes),
-				std::get<1>(sizes),
-				std::get<2>(sizes)
+				raw_reader->sizex,
+				raw_reader->sizey,
+				raw_reader->sizez
 			};
+
 			to_add["voxel_offset"] = {0,0,0};
 
 			scales.push_back(to_add);
