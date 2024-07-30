@@ -1379,7 +1379,8 @@ int main(int argc, char *argv[])
 										   ((j - y_begin) * chunk_sizes[0]) +				   // Y
 										   (i - x_begin);									   // X
 
-					out_buffer[ooffset] = chunk[coffset];
+					const uint16_t v = chunk[coffset];
+					out_buffer[ooffset] = v;
 				}
 			}
 		}
