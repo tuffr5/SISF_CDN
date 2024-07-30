@@ -1340,12 +1340,8 @@ int main(int argc, char *argv[])
 				{
 					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
 
-					if (sub_chunk_id != last_sub_chunk_id)
+					if (sub_chunk_id != last_sub_chunk_id || chunk == nullptr)
 					{
-						if (chunk != nullptr)
-						{
-							free(chunk);
-						}
 						chunk = chunk_map[sub_chunk_id];
 
 						if (chunk == 0)
