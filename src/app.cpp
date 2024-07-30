@@ -1196,7 +1196,7 @@ int main(int argc, char *argv[])
 
 	//	ENDPOINT: /<string>/raw_access/<c>,<i>,<j>,<k>/info
 	CROW_ROUTE(app, "/<string>/raw_access/<string>/info")
-	([](crow::response &res, std::string data_id)
+	([](crow::response &res, std::string data_id, std::string chunk_key)
 	 {
 		data_id = str_first(data_id, '+');
 		auto archive_search = archive_inventory.find(data_id);
