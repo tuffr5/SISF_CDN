@@ -1330,7 +1330,7 @@ int main(int argc, char *argv[])
 		uint16_t * chunk = nullptr;
 		size_t last_sub_chunk_id = SIZE_MAX;
 
-		std::map<size_t, uint16_t> chunk_map;
+		std::map<size_t, uint16_t *> chunk_map;
 
 		for (size_t i = x_begin; i < x_end; i++)
 		{
