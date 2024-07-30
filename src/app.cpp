@@ -9,6 +9,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <cstdint>
 
 #include <iostream>
@@ -1325,37 +1327,43 @@ int main(int argc, char *argv[])
 
 		uint16_t * out_buffer = (uint16_t*) malloc(out_buffer_size);
 
-		uint16_t * chunk = 0;
-		size_t last_sub_chunk_id = 0;
-		
-		for(size_t i = x_begin; i < x_end; i++) {
-			for(size_t j = y_begin; j < y_end; j++) {
-				for(size_t k = z_begin; k < z_end; k++) {
+		uint16_t * chunk = nullptr;
+		size_t last_sub_chunk_id = SIZE_MAX;
+
+		for (size_t i = x_begin; i < x_end; i++)
+		{
+			for (size_t j = y_begin; j < y_end; j++)
+			{
+				for (size_t k = z_begin; k < z_end; k++)
+				{
 					size_t sub_chunk_id = raw_reader->find_index(i, j, k);
 
-					// if(sub_chunk_id != last_sub_chunk_id) {
-					// 	if(chunk != nullptr) {
-					// 		free(chunk);
-					// 	}
-					// 	chunk = nullptr;
-					// }
+					if (sub_chunk_id != last_sub_chunk_id)
+					{
+						if (chunk != nullptr)
+						{
+							free(chunk);
+						}
+						chunk = nullptr;
+					}
 
-					// if(chunk == nullptr) {
-					 	chunk = raw_reader->load_chunk(sub_chunk_id);
-					// 	last_sub_chunk_id = sub_chunk_id;
-					// }
+					if (chunk == nullptr)
+					{
+						chunk = raw_reader->load_chunk(sub_chunk_id);
+						last_sub_chunk_id = sub_chunk_id;
+					}
 
 					// Find the start/stop coordinates of this chunk
-					const size_t xmin = ((size_t) raw_reader->chunkx) * (i / ((size_t) raw_reader->chunkx));    // lower bound of mchunk
-                	const size_t xmax = std::min((size_t)xmin + raw_reader->chunkx, (size_t)raw_reader->sizex); // upper bound of mchunk
+					const size_t xmin = ((size_t)raw_reader->chunkx) * (i / ((size_t)raw_reader->chunkx));		// lower bound of mchunk
+					const size_t xmax = std::min((size_t)xmin + raw_reader->chunkx, (size_t)raw_reader->sizex); // upper bound of mchunk
 					const size_t xsize = xmax - xmin;
 
-					const size_t ymin = ((size_t) raw_reader->chunky) * (j / ((size_t) raw_reader->chunky));
-                    const size_t ymax = std::min((size_t)ymin + raw_reader->chunky, (size_t)raw_reader->sizey);
+					const size_t ymin = ((size_t)raw_reader->chunky) * (j / ((size_t)raw_reader->chunky));
+					const size_t ymax = std::min((size_t)ymin + raw_reader->chunky, (size_t)raw_reader->sizey);
 					const size_t ysize = ymax - ymin;
 
-					const size_t zmin = ((size_t) raw_reader->chunkz) * (k / ((size_t) raw_reader->chunkz));
-                    const size_t zmax = std::min((size_t)zmin + raw_reader->chunky, (size_t)raw_reader->sizez);
+					const size_t zmin = ((size_t)raw_reader->chunkz) * (k / ((size_t)raw_reader->chunkz));
+					const size_t zmax = std::min((size_t)zmin + raw_reader->chunky, (size_t)raw_reader->sizez);
 					const size_t zsize = zmax - zmin;
 
 					const size_t x_in_chunk_offset = i - xmin;
@@ -1363,13 +1371,13 @@ int main(int argc, char *argv[])
 					const size_t z_in_chunk_offset = k - zmin;
 
 					// Calculate the coordinates of the input and output inside their respective buffers
-					const size_t coffset =  (x_in_chunk_offset * ysize * zsize) + // X
-											(y_in_chunk_offset * zsize) +         // Y
-											(z_in_chunk_offset);                  // Z
+					const size_t coffset = (x_in_chunk_offset * ysize * zsize) + // X
+										   (y_in_chunk_offset * zsize) +		 // Y
+										   (z_in_chunk_offset);					 // Z
 
-					const size_t ooffset =  ((k - z_begin) * chunk_sizes[1] * chunk_sizes[0]) +  // Z
-											((j - y_begin) * chunk_sizes[0]) +                   // Y
-											(i - x_begin);                                     // X
+					const size_t ooffset = ((k - z_begin) * chunk_sizes[1] * chunk_sizes[0]) + // Z
+										   ((j - y_begin) * chunk_sizes[0]) +				   // Y
+										   (i - x_begin);									   // X
 
 					const uint16_t v = chunk[coffset];
 					out_buffer[ooffset] = v;
