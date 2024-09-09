@@ -43,14 +43,26 @@ size_t global_chunk_cache_last = 0;
 // https://stackoverflow.com/questions/8401777/simple-glob-in-c-on-unix-system
 std::vector<std::string> glob_tool(const std::string &pattern)
 {
+    std::vector<std::string> filenames;
+
     // glob struct resides on the stack
     glob_t glob_result;
     memset(&glob_result, 0, sizeof(glob_result));
 
     // do the glob operation
-    int return_value = glob(pattern.c_str(), GLOB_TILDE, NULL, &glob_result);
+    const int glob_flag = GLOB_NOSORT | GLOB_TILDE;
+    int return_value = glob(pattern.c_str(), glob_flag, NULL, &glob_result);
+
+    if (return_value == GLOB_NOMATCH)
+    {
+        // Return nothing if no results found
+        globfree(&glob_result);
+        return filenames;
+    }
+
     if (return_value != 0)
     {
+        // Fail if another error code is found
         globfree(&glob_result);
         std::stringstream ss;
         ss << "glob() failed with return_value " << return_value << std::endl;
@@ -58,7 +70,6 @@ std::vector<std::string> glob_tool(const std::string &pattern)
     }
 
     // collect all the filenames into a std::list<std::string>
-    std::vector<std::string> filenames;
     for (size_t i = 0; i < glob_result.gl_pathc; ++i)
     {
         filenames.push_back(std::string(glob_result.gl_pathv[i]));
