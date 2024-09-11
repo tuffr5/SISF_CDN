@@ -529,7 +529,7 @@ int main(int argc, char *argv[])
 		
 		while (!open_set.empty() && N<N_limit) {
 			target = open_set.top();
-			std::cout << "Found " << target->x << ',' << target->y << ',' << target->z << " f=" << target->f() << "  c=" << target->color_intensity << std::endl;
+			//std::cout << "Found " << target->x << ',' << target->y << ',' << target->z << " f=" << target->f() << "  c=" << target->color_intensity << std::endl;
 			open_set.pop();
 
 			if(*target == *end) {
