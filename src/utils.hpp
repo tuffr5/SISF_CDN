@@ -5,6 +5,16 @@
 #include <algorithm> // std::sort
 #include <limits>
 #include <chrono>
+#include <cstdlib>
+
+std::string read_env_variable(std::string name)
+{
+    const char *env_var = std::getenv(name.c_str());
+
+    if (env_var == nullptr)
+        return "";
+    return std::string(env_var);
+}
 
 std::vector<std::string> str_split(const std::string &s, char del)
 {
