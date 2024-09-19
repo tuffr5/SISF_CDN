@@ -30,6 +30,8 @@
 #include "counter.hpp"
 
 int port = 6000;
+int THREAD_COUNT = 32;
+bool READ_ONLY_MODE = false;
 std::string DATA_PATH = "./data/";
 
 using json = nlohmann::json;
@@ -235,6 +237,20 @@ int main(int argc, char *argv[])
 				DATA_PATH = std::string(argv[2]);
 			}
 		}
+	}
+
+	std::string read_only = read_env_variable("READ_ONLY");
+	if (read_only.size() > 0)
+	{
+		READ_ONLY_MODE = true;
+		std::cout << "Using read only mode." << std::endl;
+	}
+
+	std::string thread_count = read_env_variable("THREAD_COUNT");
+	if (thread_count.size() > 0)
+	{
+		std::istringstream tc(thread_count);
+		tc >> THREAD_COUNT;
 	}
 
 	load_inventory();
@@ -816,6 +832,10 @@ int main(int argc, char *argv[])
 	CROW_ROUTE(app, "/<string>/skeleton_api/delete/<int>")
 	([](std::string data_id, int neuron_id)
 	 {
+		if(READ_ONLY_MODE) {
+			return crow::response(crow::status::BAD_REQUEST);
+		}
+
 		data_id = str_first(data_id, '+');
 
 		std::vector<std::string> trace_file = glob_tool(DATA_PATH + data_id + "/traces.sql");
@@ -844,6 +864,9 @@ int main(int argc, char *argv[])
 
 	CROW_ROUTE(app, "/<string>/skeleton_api/replace/<int>").methods("POST"_method)([](const crow::request &req, std::string data_id, int neuron_id)
 																				   {
+		if(READ_ONLY_MODE) {
+			return crow::response(crow::status::BAD_REQUEST);
+		}
 
 		data_id = str_first(data_id, '+');
 
@@ -980,6 +1003,10 @@ int main(int argc, char *argv[])
 
 	CROW_ROUTE(app, "/<string>/skeleton_api/upload").methods("POST"_method)([](const crow::request &req, std::string data_id)
 																			{
+		if(READ_ONLY_MODE) {
+			return crow::response(crow::status::BAD_REQUEST);
+		}
+
 		data_id = str_first(data_id, '+');
 
 		crow::multipart::message msg(req);
@@ -1506,11 +1533,12 @@ int main(int argc, char *argv[])
 
 	{ // App start logic
 		std::cout << "Using port: " << port << std::endl;
+		std::cout << "Thread count: " << THREAD_COUNT << std::endl;
 
 		app.port(port)
 			//.use_compression(crow::compression::algorithm::DEFLATE)
 			//.use_compression(crow::compression::algorithm::GZIP)
-			.concurrency(32)
+			.concurrency(THREAD_COUNT)
 			//.multithreaded()
 			.loglevel(crow::LogLevel::Warning)
 			.timeout(5)
