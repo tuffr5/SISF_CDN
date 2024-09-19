@@ -2,7 +2,46 @@
 A tool for remote access of SISF Files over HTTP.
 
 ## Endpoint Definitions
-TODO
+
+### General Server Maintenance
+
+| Endpoint | Description |
+|----------|-------------|
+| `/` | Returns the string `Server is up!` for uptime polling.  | 
+| `/performance` | Prints a HTML table with function timing, separated by dataset and function. |
+| `/access` | Prints a HTML table listing the number of hits, separated by source IP. |
+| `/inventory` | Prints a HTML table listing of each dataset hosted on this server. |
+
+### Data Access
+
+| Endpoint | Description |
+|----------|-------------|
+| `/<dataset id>/info` | Generates a Neuroglancer-formatted info metadata file for given dataset. |
+| `/<dataset id>/tracing/x1,y1,z1/x2,y2,z2` | Returns a tracing path between coordinate 1 to coordinate 2 given by the tuples `(x1,y1,z1)` and `(x2,y2,z2)`. |
+| `/<dataset id>/meanshift/x,y,z` | Performs the meanshift algorithm from [here](https://academic.oup.com/bioinformatics/article/35/18/3544/5306330) at the coordinate given by `(x,y,z)` and returns a new coordinate. |
+| `/<dataset id>/skeleton/<neuron id>` | Generates a Neuroglancer-formatted neuron morphology file. |
+| `/<dataset id>/skeleton/info` | Generates a Neuroglancer-formatted info metadata file for the skeletons in the database. |
+| `/<dataset id>/skeleton/segment_properties/info` | Generates a Neuroglancer-formatted info metadata file for the skeletons in the database. |
+| `/<dataset id>/<res>/<xs>-<xe>_<ys>-<ye>_<zs>-<ze>` | Downloads a Fortran-order image chunk of the region defined by the boundary `[xs,xe)`, `[ys,ye)`, `[zs,ze)` and resolution id `res` |
+
+### Trace manipulation
+| Endpoint | Description |
+|----------|-------------|
+| `/<dataset id>/skeleton_api/delete/<neuron id>` | Deletes neuron indicated by `neuron id`. |
+| `/<dataset id>/skeleton_api/replace/<neuron id>` | Deletes neuron indicated by `neuron id` and replaces it with the contents of a SWC file `POST`-ed to the request. |
+| `/<dataset id>/skeleton_api/ls` | Returns a list of neurons defined for given dataset, formatted as a JSON response. | 
+| `/<dataset id>/skeleton_api/upload` | Uploads a new neuron from the contents of a SWC file `POST`-ed to the request, returns the ID of the added neuron. |
+| `/<dataset id>/skeleton_api/get/<neuron id>` | Downloads a SWC-formatted neuron morphology file for neuron indicated by `neuron id` |
+
+### Raw data access
+These functions allow accessing tiled data, one tile at a time. Notably, this ignores virtual cropping, allowing pipelines which rely on image overlaps to be built.
+
+| Endpoint | Description |
+|----------|-------------|
+| `/<dataset id>/raw_access/<c>,<i>,<j>,<k>/info` | Returns a Neuroglancer-formatted info file for the SISF chunk represented by color `c`, and chunk coordinate `i,j,k` | 
+| `/<dataset id>/raw_access/<c>,<i>,<j>,<k>/<res>/<xs>-<xe>_<ys>-<ye>_<zs>-<ze>` | Downloads a Fortran-order image chunk of the region defined by the boundary `[xs,xe)`, `[ys,ye)`, `[zs,ze)` and resolution id `res` | 
+
+
 
 ## C++ Libraries
 
