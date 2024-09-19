@@ -874,16 +874,7 @@ int main(int argc, char *argv[])
 			return crow::response(crow::status::BAD_REQUEST);
 		}
 		
-		std::cout << "Loading file: " << trace_file[0] << std::endl; 
-
-		std::string sql = "DELETE FROM SWC WHERE neuronid=" + std::to_string(neuron_id) + ";";
-
-		{
-			auto db = database_interface(trace_file[0]);
-			auto retv = db.run(sql);
-		}
-		
-		std::cout << "Removed SWC lines for Neuron " << neuron_id << std::endl;
+		std::cout << "Using file: " << trace_file[0] << std::endl;
 
 		///////////////////////
 
@@ -922,6 +913,10 @@ int main(int argc, char *argv[])
 
 		std::stringstream sql_builder("");
 
+		sql_builder << "BEGIN TRANSACTION;";
+		
+		sql_builder << "DELETE FROM SWC WHERE neuronid=" + std::to_string(neuron_id) + ";";
+
 		sql_builder << "INSERT INTO SWC"
 					<< "(I,NEURONID,PARENTID,X,Y,Z,R,T,USERID)"
 					<< " VALUES ";
@@ -931,7 +926,6 @@ int main(int argc, char *argv[])
 		{
 			const auto [type, x, y, z, r, parent] = a;
 			int64_t parent_new = old_to_new[parent];
-			// std::cout << x << '\t' << y << '\t' << z << '\t' << r << '\t' << parent_new << std::endl;
 			
 			int user = -1;
 			sql_builder << "(" << i << ","
@@ -944,6 +938,8 @@ int main(int argc, char *argv[])
 
 		sql_builder.seekp(-1,sql_builder.cur);
 		sql_builder << ";";
+
+		sql_builder << "COMMIT;";
 
 		{
 			auto db = database_interface(trace_file[0]);
