@@ -80,7 +80,7 @@ void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, siz
 		}
 	}
 
-	if (filter_name == "power")
+	if (filter_name == "gamma")
 	{
 		float gamma = std::stof(filter_param);
 		for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
@@ -95,7 +95,7 @@ void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, siz
 		}
 	}
 
-	if (filter_name == "gamma")
+	if (filter_name == "gammascaled")
 	{
 		float gamma = std::stof(filter_param);
 		for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
