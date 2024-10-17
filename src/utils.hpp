@@ -144,15 +144,31 @@ struct astar_cell
         return std::pow(out, 0.5);
     }
 
-    void load_color(archive_reader *image, int window)
+    void define_color_vector(size_t channel_count_in)
     {
-        channel_count = image->channel_count;
-        color_vector = (double *)malloc(sizeof(double) * image->channel_count);
+        channel_count = channel_count_in;
+        color_vector = (double *)malloc(sizeof(double) * channel_count);
 
         for (size_t c = 0; c < channel_count; c++)
         {
             color_vector[c] = 0.0;
         }
+    }
+
+    void calculate_intensity_average()
+    {
+        // Calculate average
+        color_intensity = 0;
+        for (size_t i = 0; i < channel_count; i++)
+        {
+            color_intensity += color_vector[i];
+        }
+        //color_intensity /= channel_count;
+    }
+
+    void load_color(archive_reader *image, int window)
+    {
+        define_color_vector(image->channel_count);
 
         const int xs = std::max(x - window, 0);
         const int xe = std::min(x + window, (int)image->sizex - 1);
@@ -185,18 +201,18 @@ struct astar_cell
             }
         }
 
-        // Calculate average
-        color_intensity = 0;
+        free(read_buffer);
+
+        // normalize vector
         for (size_t i = 0; i < channel_count; i++)
         {
             for (size_t j = 0; j < 3; j++)
             {
                 color_vector[i] /= chunk_sizes[j];
             }
-            color_intensity += color_vector[i];
         }
 
-        free(read_buffer);
+        calculate_intensity_average();
     }
 
     void delete_color_vector()
@@ -268,3 +284,15 @@ const std::vector<std::tuple<int, int, int, double>>
         {1, 1, -1, 1.7320508075688772},
         {1, 1, 0, 1.4142135623730951},
         {1, 1, 1, 1.7320508075688772}};
+
+
+const std::vector<std::tuple<int, int, int, double>>
+    neighbor_steps_no_z = {
+        {-1, -1, 0, 1.4142135623730951},
+        {-1, 0, 0, 1.0},
+        {-1, 1, 0, 1.4142135623730951},
+        {0, -1, 0, 1.0},
+        {0, 1, 0, 1.0},
+        {1, -1, 0, 1.4142135623730951},
+        {1, 0, 0, 1.0},
+        {1, 1, 0, 1.4142135623730951}};
