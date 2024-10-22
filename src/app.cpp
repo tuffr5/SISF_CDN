@@ -507,8 +507,11 @@ int main(int argc, char *argv[])
     	res.end(); });
 
 	CROW_ROUTE(app, "/<string>/tracing/<string>/<string>")
-	([](crow::response &res, std::string data_id, std::string pt_in_s1, std::string pt_in_s2)
+	([](const crow::request &req, crow::response &res, std::string data_id, std::string pt_in_s1, std::string pt_in_s2)
 	 {
+		auto soma_param = req.url_params.get("is_soma");
+		bool is_soma = soma_param != nullptr && strcmp(soma_param, "true") == 0;
+		std::cout << "is_soma=" << is_soma << std::endl;
 		int pt1[3], pt2[3];
 		if(sscanf(pt_in_s1.c_str(), "%d,%d,%d", &pt1[0], &pt1[1], &pt1[2]) != 3) {
 			res.end("Invalid point descriptor " + pt_in_s1);
@@ -529,18 +532,29 @@ int main(int argc, char *argv[])
 		archive_reader * reader = archive_search->second;
 
 		if(pt1[0] < 0 || pt1[1] < 0 || pt1[2] < 0 || pt1[0] >= reader->sizex || pt1[1] >= reader->sizey || pt1[2] >= reader->sizez) {
+			res.code = 400;
 			res.end("Pt 1 out of bounds.");
 			return;
 		}
 
 		if(pt2[0] < 0 || pt2[1] < 0 || pt2[2] < 0 || pt2[0] >= reader->sizex || pt2[1] >= reader->sizey || pt2[2] >= reader->sizez) {
+			res.code = 400;
 			res.end("Pt 2 out of bounds.");
 			return;
 		}
 
+		if (is_soma) {
+			if (pt1[2] != pt2[2]) {
+				res.code = 400;
+				res.end("Soma tracing requires both points to be in the same z slice.");
+				return;
+			}
+		}
+
 		std::stringstream out;
 
-		std::vector<astar_cell *> closed_set;
+		auto coord_cmp = [](astar_cell *a, astar_cell *b) { return a->x < b->x || (a->x == b->x && a->y < b->y) || (a->x == b->x && a->y == b->y && a->z < b->z); };
+		std::set<astar_cell *, decltype(coord_cmp)> closed_set(coord_cmp);
 		std::priority_queue<astar_cell *, std::vector<astar_cell*>, std::function<bool(astar_cell *, astar_cell *)>> open_set(compare_astar_cell);
 
 		astar_cell *start = new astar_cell(pt1[0], pt1[1], pt1[2], 0, 0, 0);
@@ -559,20 +573,69 @@ int main(int argc, char *argv[])
 
 		astar_cell * target;
 		size_t N = 0;
-		const size_t N_limit = 10000;
-
+		const size_t N_limit = 100000;
 		const size_t channel_count = reader->channel_count;
-		
+
+		const bool use_buffering = true;
+		uint16_t * region_data = nullptr;
+
+		int region_start_x = std::min(start->x, end->x);
+		int region_end_x = std::max(start->x, end->x);
+		int region_start_y = std::min(start->y, end->y);
+		int region_end_y = std::max(start->y, end->y);
+		int region_start_z = std::min(start->z, end->z);
+		int region_end_z = std::max(start->z, end->z);
+
+		const int window = 5; // window to dilate sampled region by for overlaps 
+
+		region_start_x -= window;
+		region_end_x += window;
+		region_start_y -= window;
+		region_end_y += window;
+		region_start_z -= window;
+		region_end_z += window;
+
+		region_start_x = std::max(region_start_x, (int) 0);
+		region_start_y = std::max(region_start_y, (int) 0);
+		region_start_z = std::max(region_start_z, (int) 0);
+		region_end_x = std::min(region_end_x, (int) reader->sizex); 
+		region_end_y = std::min(region_end_y, (int) reader->sizey); 
+		region_end_z = std::min(region_end_z, (int) reader->sizez); 
+
+		const size_t region_size_x = region_end_x - region_start_x;
+		const size_t region_size_y = region_end_y - region_start_y;
+		const size_t region_size_z = region_end_z - region_start_z;
+
+		if(true) { 
+			std::cout << "Getting range: [" << region_start_x << "," << region_end_x << "], ["
+					<< region_start_y << "," << region_end_y << "], [" << region_start_z << ","
+					<< region_end_z << "]" << std::endl;
+		}
+
+		if (use_buffering)
+		{
+			region_data = reader->load_region(1, region_start_x, region_end_x, region_start_y, region_end_y, region_start_z, region_end_z);
+		}
+
 		while (!open_set.empty() && N<N_limit) {
 			target = open_set.top();
-			//std::cout << "Found " << target->x << ',' << target->y << ',' << target->z << " f=" << target->f() << "  c=" << target->color_intensity << std::endl;
+			if(true) {
+				std::cout << "Found " << target->x << ',' << target->y << ',' << target->z
+					<< " f=" << target->f() 
+					//<< " g=" << target->g()
+					//<< " h=" << target->h()
+					<< " c=" << target->color_intensity
+					<< std::endl;
+			}
 			open_set.pop();
 
 			if(*target == *end) {
 				break;
 			}
 
-			for(auto step : neighbor_steps) {
+
+
+			for(auto step : (is_soma ? neighbor_steps_no_z : neighbor_steps)) {
 				const int dx = std::get<0>(step);
 				const int dy = std::get<1>(step);
 				const int dz = std::get<2>(step);
@@ -584,30 +647,61 @@ int main(int argc, char *argv[])
 
 				const double new_g = target->g + ds;
 
-				if(new_x < 0 || new_y < 0 || new_z < 0 || new_x >= reader->sizex || new_y >= reader->sizey || new_z >= reader->sizez) {
+				if (new_x < 0 || new_y < 0 || new_z < 0 || new_x >= reader->sizex || new_y >= reader->sizey || new_z >= reader->sizez)
+				{
 					continue;
 				}
 
-				astar_cell * new_pt = new astar_cell(new_x, new_y, new_z, new_g, 0, target);
+				if (use_buffering)
+				{
+					if (new_x < region_start_x ||
+						new_x >= region_end_x ||
+						new_y < region_start_y ||
+						new_y >= region_end_y ||
+						new_z < region_start_z ||
+						new_z >= region_end_z)
+					{
+						continue;
+					}
+				}
+
+				astar_cell *new_pt = new astar_cell(new_x, new_y, new_z, new_g, 0, target);
 				new_pt->h = new_pt->euclidean_distance(end);
 
 				bool dont_add = false;
-				for(int i = closed_set.size() - 1; i >= 0 && !dont_add; i--) {
-					dont_add |= (*closed_set[i] == *new_pt);
-				}
+				dont_add |= closed_set.find(new_pt) != closed_set.end();
 
-				if(!dont_add) {
-					const size_t window_size = 2;
-					new_pt->load_color(reader, window_size);
+				if (!dont_add)
+				{
+					if (!use_buffering)
+					{
+						const size_t window_size = 2;
+						new_pt->load_color(reader, window_size);
+					}
+					else
+					{
+						new_pt->define_color_vector(channel_count);
+						for (size_t c = 0; c < channel_count; c++)
+						{
+							size_t offset = (c * region_size_x * region_size_y * region_size_z) +
+											((new_pt->z - region_start_z) * region_size_y * region_size_x) +
+											((new_pt->y - region_start_y) * region_size_x) +
+											(new_pt->x - region_start_x);
+
+							new_pt->color_vector[c] += region_data[offset];
+						}
+						new_pt->calculate_intensity_average();
+					}
+
 					dont_add |= avg_color_threshold > new_pt->color_intensity;
 				}
 
-				if(!dont_add && new_pt->channel_count > 1) {
+				if (!dont_add && new_pt->channel_count > 1)
+				{
 					double color_angle = start->color_angle(new_pt);
 					dont_add |= color_angle > .5;
 				}
 
-	
 				//for(size_t i = 0; i < new_pt->channel_count; i++) {
 				//	std::cout << new_pt->color_vector[i];
 				//	if(i != new_pt->channel_count - 1) std::cout << ',';
@@ -619,12 +713,17 @@ int main(int argc, char *argv[])
 					delete new_pt;
 				} else {
 					open_set.push(new_pt);
-					closed_set.push_back(new_pt);
+					closed_set.insert(new_pt);
 				}
 			}
 
 			N++;
 		}
+
+		if(use_buffering) {
+			free(region_data);
+		}
+		std::cout << "Iterations: " << N << '\n';
 
 		// Print results
 		if(*target == *end) {
@@ -641,6 +740,7 @@ int main(int argc, char *argv[])
 				out << target->x << ',' << target->y << ',' << target->z << '\n';
 			}
 		} else {
+			res.code = 400;
 			if(N == N_limit) {
 				out << "Ran out of iterations" << '\n';
 			} else {
@@ -649,9 +749,9 @@ int main(int argc, char *argv[])
 		}
 
 		delete end;
-		for(size_t i = 0; i < closed_set.size(); i++) {
-			closed_set[i]->delete_color_vector();
-			delete closed_set[i];
+		for (auto &entry : closed_set) {
+			entry->delete_color_vector();
+			delete entry;
 		}
 
 		res.end(out.str()); });
@@ -821,7 +921,10 @@ int main(int argc, char *argv[])
 
 		json toadd_inline;
 		toadd_inline["ids"] = ids;
-		toadd_inline["properties"] = { id_prop };
+		// vector of one item 
+		std::vector<json> properties;
+		properties.push_back(id_prop);
+		toadd_inline["properties"] = properties;
 
 		json response;
 		response["@type"] = "neuroglancer_segment_properties";
