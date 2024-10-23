@@ -427,16 +427,57 @@ public:
         size_t size_y_out = sizey / scale;
         size_t size_z_out = sizez / scale;
 
+        // Start with the size of one chunk
+        double dilation_x = this->mchunkx;
+        double dilation_y = this->mchunky;
+        double dilation_z = this->mchunkz;
+
+        // Divide by scale
+        dilation_x /= scale;
+        dilation_y /= scale;
+        dilation_z /= scale;
+
+        // Isolate fractional part of dilation
+        dilation_x -= std::floor(dilation_x);
+        dilation_y -= std::floor(dilation_y);
+        dilation_z -= std::floor(dilation_z);
+
+        // Scale dilation by number of tiles
+        dilation_x *= this->mcountx;
+        dilation_y *= this->mcounty;
+        dilation_z *= this->mcountz;
+
+        // round up
+        dilation_x = std::ceil(dilation_x);
+        dilation_y = std::ceil(dilation_y);
+        dilation_z = std::ceil(dilation_z);
+        
+        size_x_out -= dilation_x;
+        size_y_out -= dilation_y;
+        size_z_out -= dilation_z;
+
+        std::cout << "Scale: " << scale << " " << dilation_x << " " << dilation_y << " " << dilation_z << std::endl;
+
         return std::make_tuple(size_x_out, size_y_out, size_z_out);
     }
 
     std::tuple<size_t, size_t, size_t> get_res(size_t scale)
     {
-        size_t resx_out = resx * scale;
-        size_t resy_out = resy * scale;
-        size_t resz_out = resz * scale;
+        std::tuple<size_t, size_t, size_t> size = this->get_size(scale);
 
-        return std::make_tuple(resx_out, resy_out, resz_out);
+        double resx_out = resx;
+        double resy_out = resy;
+        double resz_out = resz;
+
+        resx_out *= sizex;
+        resy_out *= sizey;
+        resz_out *= sizez;
+
+        resx_out /= std::get<0>(size);
+        resy_out /= std::get<1>(size);
+        resz_out /= std::get<2>(size);
+
+        return std::make_tuple((size_t) resx_out, (size_t) resy_out, (size_t) resz_out);
     }
 
     std::tuple<size_t, size_t, size_t> inline find_index(size_t x, size_t y, size_t z)
