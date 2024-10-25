@@ -456,7 +456,7 @@ public:
         size_y_out -= dilation_y;
         size_z_out -= dilation_z;
 
-        std::cout << "Scale: " << scale << " " << dilation_x << " " << dilation_y << " " << dilation_z << std::endl;
+        //std::cout << "Scale: " << scale << " " << dilation_x << " " << dilation_y << " " << dilation_z << std::endl;
 
         return std::make_tuple(size_x_out, size_y_out, size_z_out);
     }
