@@ -1,2 +1,7 @@
-app:
-	g++ -std=c++17 -O3 -march=native src/app.cpp ./zstd/lib/libzstd.so ./x264/libx264.a -lpthread -lsqlite3 -o nTracer_cdn -Wl,--no-as-needed -ldl
+CXXFILES = src/app.cpp
+INCLIBS = ./zstd/lib/libzstd.so ./x264/libx264.a
+LIBS = -lpthread -lsqlite3 -lavcodec -lavformat -lavutil -lswscale 
+CXXFLAGS = -O3 -std=c++17 -march=native -o nTracer_cdn -Wl,--no-as-needed -ldl
+
+all:
+	$(CXX) $(CXXFILES) $(INCLIBS) $(LIBS) $(CXXFLAGS)
