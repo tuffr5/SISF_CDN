@@ -17,6 +17,8 @@ jobs:
         submodules: 'true'
     - name: install-depends
       run: sudo apt install -y libboost-all-dev libsqlite3-dev libasio-dev nasm
+    - name: install-ffmpeg
+      run: sudo apt install -y ffmpeg libswscale-dev libavutil-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libpostproc-dev libswresample-dev
     - name: build-x264
       run: cd x264; make -j 5; cd ..
     - name: build-zstd
