@@ -93,6 +93,7 @@ private:
     const size_t entry_file_line_size = 8 + 4;
 
 public:
+    bool found;
     uint16_t channel_count;
     uint16_t dtype, version;
     uint16_t compression_type;
@@ -117,7 +118,15 @@ public:
         data_fname = data_fname_in;
 
         std::ifstream file(meta_fname, std::ios::in | std::ios::binary);
-        // TODO EXCEPTION IF FNE
+
+        //if (file.fail())
+        //{
+        //    std::cerr << "Fopen failed (chunk metadata)" << std::endl;
+        //    found = false
+        //    return;
+        //}
+
+        found = true;
 
         file.read((char *)&version, sizeof(uint16_t));
         file.read((char *)&dtype, sizeof(uint16_t));
@@ -177,7 +186,7 @@ public:
 
             if (file.fail())
             {
-                std::cerr << "Fopen failed" << std::endl;
+                std::cerr << "Fopen failed (metadata)" << std::endl;
                 continue;
             }
 
@@ -198,6 +207,13 @@ public:
     {
         uint16_t *out = (uint16_t *)calloc(max_chunk_size, 1);
         metadata_entry *sel = load_meta_entry(id);
+
+        if (sel->size == 0)
+        {
+            // Failed to read metadata (impossible for chunk size to be 0)
+            free(sel);
+            return out;
+        }
 
         uint16_t *from_cache = 0;
 
@@ -256,6 +272,7 @@ public:
 
             // 1 -> zstd
             // 2 -> 264
+            // 3 -> AV1
             switch (compression_type)
             {
             case 1:
@@ -266,15 +283,16 @@ public:
 
             case 2:
                 // Decompress with vidlib
-                read_decomp_buffer_pt = decode_stack_2(chunkx, chunky, chunkz, read_buffer, sel->size);
+                read_decomp_buffer_pt = decode_stack_264(chunkx, chunky, chunkz, read_buffer, sel->size);
                 read_decomp_buffer = (char *)pixtype_to_uint16(read_decomp_buffer_pt, chunkx * chunky * chunkz);
                 free(read_decomp_buffer_pt);
                 break;
 
             case 3:
                 // Decompress with vidlib 2
-                read_decomp_buffer_pt = decode_stack_AV1_decapp(chunkx, chunky, chunkz, read_buffer, sel->size).second;
-                read_decomp_buffer = (char *)pixtype_to_uint16_YUV420(read_decomp_buffer_pt, chunkx, chunky, chunkz);
+                read_decomp_buffer_pt = decode_stack_AV1(chunkx, chunky, chunkz, read_buffer, sel->size);
+                // read_decomp_buffer = (char *)pixtype_to_uint16_YUV420(read_decomp_buffer_pt, chunkx, chunky, chunkz);
+                read_decomp_buffer = (char *)pixtype_to_uint16(read_decomp_buffer_pt, chunkx * chunky * chunkz);
                 free(read_decomp_buffer_pt);
                 break;
             }
@@ -378,6 +396,11 @@ public:
     {
         std::ifstream file(fname + "/metadata.bin", std::ios::in | std::ios::binary);
 
+        if (file.fail())
+        {
+            ;
+        }
+
         file.read((char *)&archive_version, sizeof(uint16_t));
         file.read((char *)&dtype, sizeof(uint16_t));
         file.read((char *)&channel_count, sizeof(uint16_t));
@@ -451,12 +474,12 @@ public:
         dilation_x = std::ceil(dilation_x);
         dilation_y = std::ceil(dilation_y);
         dilation_z = std::ceil(dilation_z);
-        
+
         size_x_out -= dilation_x;
         size_y_out -= dilation_y;
         size_z_out -= dilation_z;
 
-        //std::cout << "Scale: " << scale << " " << dilation_x << " " << dilation_y << " " << dilation_z << std::endl;
+        // std::cout << "Scale: " << scale << " " << dilation_x << " " << dilation_y << " " << dilation_z << std::endl;
 
         return std::make_tuple(size_x_out, size_y_out, size_z_out);
     }
@@ -477,7 +500,7 @@ public:
         resy_out /= std::get<1>(size);
         resz_out /= std::get<2>(size);
 
-        return std::make_tuple((size_t) resx_out, (size_t) resy_out, (size_t) resz_out);
+        return std::make_tuple((size_t)resx_out, (size_t)resy_out, (size_t)resz_out);
     }
 
     std::tuple<size_t, size_t, size_t> inline find_index(size_t x, size_t y, size_t z)
