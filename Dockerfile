@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 ARG CDN_PORT=6000
-ARG BUILD_THREAD=5
+ARG BUILD_THREAD=64
 
 RUN apt update
 RUN apt install -y build-essential libboost-all-dev libsqlite3-dev libasio-dev nasm cmake
