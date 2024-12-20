@@ -20,6 +20,41 @@
 
 #include "../zstd/lib/zstd.h"
 
+#include "absl/flags/flag.h"
+#include "absl/flags/marshalling.h"
+#include "absl/status/status.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_join.h"
+#include "absl/strings/str_split.h"
+#include <half.hpp>
+
+#include "tensorstore/array.h"
+#include "tensorstore/context.h"
+#include "tensorstore/contiguous_layout.h"
+#include "tensorstore/data_type.h"
+#include "examples/data_type_invoker.h"
+#include "absl/flags/parse.h"
+#include "tensorstore/index.h"
+#include "tensorstore/index_space/dim_expression.h"
+#include "tensorstore/index_space/index_transform.h"
+#include "tensorstore/index_space/transformed_array.h"
+#include "tensorstore/index_space/index_transform_builder.h"
+#include "tensorstore/open.h"
+#include "tensorstore/read_write_options.h"
+#include "tensorstore/open_mode.h"
+#include "tensorstore/progress.h"
+#include "tensorstore/rank.h"
+#include "tensorstore/spec.h"
+#include "tensorstore/tensorstore.h"
+#include "tensorstore/util/future.h"
+#include "tensorstore/util/iterate_over_index_range.h"
+#include "tensorstore/util/json_absl_flag.h"
+#include "tensorstore/util/result.h"
+#include "tensorstore/util/span.h"
+#include "tensorstore/util/status.h"
+#include "tensorstore/util/str_cat.h"
+#include "tensorstore/util/utf8_string.h"
+
 #define CHUNK_TIMER 0
 #define DEBUG_SLICING 0
 
@@ -31,6 +66,11 @@ struct global_chunk_line
     size_t mchunk;
     size_t chunk;
     uint16_t *ptr;
+};
+
+enum ArchiveType {
+    SISF,
+    ZARR
 };
 
 std::chrono::duration cache_lock_timeout = std::chrono::milliseconds(10);
@@ -384,15 +424,93 @@ public:
 
     std::vector<size_t> scales;
 
-    archive_reader(std::string name_in)
+    ArchiveType type;
+
+    archive_reader(std::string name_in, enum ArchiveType type_in)
     {
         fname = name_in;
-        load_metadata();
+        type = type_in;
+
+        switch(type) {
+            case SISF:
+                load_metadata_sisf();
+                break;
+            case ZARR:
+                load_metadata_zarr();
+                break;
+        }
     }
 
     ~archive_reader() {}
 
-    void load_metadata()
+    void load_metadata_zarr()
+    {
+        tensorstore::Context context = tensorstore::Context::Default();
+        auto store_future = tensorstore::Open({
+            {"driver", "zarr3"},
+            {"kvstore", {
+                {"driver", "file"},
+                {"path", fname}
+            }}
+        }, context, tensorstore::OpenMode::open, tensorstore::ReadWriteMode::read); 
+
+        auto store_result = store_future.result();
+
+        if (!store_result.ok())
+        {
+            std::cerr << "Error opening TensorStore: " << store_result.status() << std::endl;
+        }
+
+        auto store = std::move(store_result.value());
+
+        auto domain = store.domain();
+        auto shape = domain.shape();
+
+        sizex = 0;
+        sizey = 0;
+        sizez = 0;
+        channel_count = 0;
+
+        size_t i = 0;
+        for (const auto& dim : shape) {
+            switch(i) {
+                case 0: // x
+                    sizex = dim;
+                case 1: // y
+                    sizey = dim;
+                case 2: // z
+                    sizez = dim;
+                case 3: // c
+                    channel_count = dim;
+            }
+
+            i++;
+        }
+
+        if(sizex == 0 || sizey == 0 || sizez == 0 || channel_count == 0) {
+            std::cerr << "Invalid rank in Zarr dataset [" << fname << "]. Found i=" << i << std::endl;
+        }
+
+        archive_version = 0;
+        dtype = 1;
+
+        // TODO Load res from ts
+        resx = 100;
+        resy = 100;
+        resz = 100;
+
+        mchunkx = sizex;
+        mchunky = sizey;
+        mchunkz = sizez;
+
+        mcountx = 1;
+        mcounty = 1;
+        mcountz = 1;
+
+        scales.push_back(1);        
+    }
+
+    void load_metadata_sisf()
     {
         std::ifstream file(fname + "/metadata.bin", std::ios::in | std::ios::binary);
 
@@ -564,139 +682,203 @@ public:
         const size_t buffer_size = osizex * osizey * osizez * sizeof(uint16_t) * channel_count;
 
         // Allocate buffer for output
-        uint16_t *out_buffer = (uint16_t *)malloc(buffer_size);
+        uint16_t *out_buffer = (uint16_t *)calloc(buffer_size, 1);
 
-        // Define map for storing already decompressed chunks
-        std::map<std::tuple<size_t, size_t, size_t, size_t, size_t>, uint16_t *> chunk_cache;
+        if(type == SISF) {
+            // Define map for storing already decompressed chunks
+            std::map<std::tuple<size_t, size_t, size_t, size_t, size_t>, uint16_t *> chunk_cache;
 
-        // Scaled metachunk size
-        const size_t mcx = mchunkx / scale;
-        const size_t mcy = mchunky / scale;
-        const size_t mcz = mchunkz / scale;
+            // Scaled metachunk size
+            const size_t mcx = mchunkx / scale;
+            const size_t mcy = mchunky / scale;
+            const size_t mcz = mchunkz / scale;
 
-        // Variables to store chunk reader and data (shared in loop)
-        packed_reader *chunk_reader = nullptr;
-        std::tuple<size_t, size_t, size_t, size_t, size_t> *chunk_identifier = nullptr;
-        size_t sub_chunk_id;
-        uint16_t *chunk;
+            // Variables to store chunk reader and data (shared in loop)
+            packed_reader *chunk_reader = nullptr;
+            std::tuple<size_t, size_t, size_t, size_t, size_t> *chunk_identifier = nullptr;
+            size_t sub_chunk_id;
+            uint16_t *chunk;
 
-        // Variables for tracking the last chunks that were used
-        size_t last_x, last_y, last_z, last_sub, last_c;
-        size_t cxmin, cxmax, cxsize;
-        size_t cymin, cymax, cysize;
-        size_t czmin, czmax, czsize;
+            // Variables for tracking the last chunks that were used
+            size_t last_x, last_y, last_z, last_sub, last_c;
+            size_t cxmin, cxmax, cxsize;
+            size_t cymin, cymax, cysize;
+            size_t czmin, czmax, czsize;
 
-        for (size_t c = 0; c < channel_count; c++)
-        {
-            for (size_t i = xs; i < xe; i++)
+            for (size_t c = 0; c < channel_count; c++)
             {
-                const size_t xmin = mcx * (i / mcx);                             // lower bound of mchunk
-                const size_t xmax = std::min((size_t)xmin + mcx, (size_t)sizex); // upper bound of mchunk
-                const size_t xsize = xmax - xmin;                                // size of mchunk
-                const size_t chunk_id_x = i / ((size_t)mcx);                     // mchunk x id
-                const size_t x_in_chunk = i - xmin;                              // x displacement inside chunk
-
-                for (size_t j = ys; j < ye; j++)
+                for (size_t i = xs; i < xe; i++)
                 {
-                    const size_t ymin = mcy * (j / mcy);
-                    const size_t ymax = std::min((size_t)ymin + mcy, (size_t)sizey);
-                    const size_t ysize = ymax - ymin;
-                    const size_t chunk_id_y = j / ((size_t)mcy);
-                    const size_t y_in_chunk = j - ymin;
+                    const size_t xmin = mcx * (i / mcx);                             // lower bound of mchunk
+                    const size_t xmax = std::min((size_t)xmin + mcx, (size_t)sizex); // upper bound of mchunk
+                    const size_t xsize = xmax - xmin;                                // size of mchunk
+                    const size_t chunk_id_x = i / ((size_t)mcx);                     // mchunk x id
+                    const size_t x_in_chunk = i - xmin;                              // x displacement inside chunk
 
-                    for (size_t k = zs; k < ze; k++)
+                    for (size_t j = ys; j < ye; j++)
                     {
-                        const size_t zmin = mcz * (k / mcz);
-                        const size_t zmax = std::min((size_t)zmin + mcz, (size_t)sizez);
-                        const size_t zsize = zmax - zmin;
-                        const size_t chunk_id_z = k / ((size_t)mcz);
-                        const size_t z_in_chunk = k - zmin;
+                        const size_t ymin = mcy * (j / mcy);
+                        const size_t ymax = std::min((size_t)ymin + mcy, (size_t)sizey);
+                        const size_t ysize = ymax - ymin;
+                        const size_t chunk_id_y = j / ((size_t)mcy);
+                        const size_t y_in_chunk = j - ymin;
 
-                        bool force = false;
-                        if (chunk_reader == nullptr ||
-                            chunk_identifier == nullptr ||
-                            last_x != chunk_id_x ||
-                            last_y != chunk_id_y ||
-                            last_z != chunk_id_z ||
-                            last_c != c)
+                        for (size_t k = zs; k < ze; k++)
                         {
-                            force = true;
-                            chunk_reader = get_mchunk(scale, c, chunk_id_x, chunk_id_y, chunk_id_z);
+                            const size_t zmin = mcz * (k / mcz);
+                            const size_t zmax = std::min((size_t)zmin + mcz, (size_t)sizez);
+                            const size_t zsize = zmax - zmin;
+                            const size_t chunk_id_z = k / ((size_t)mcz);
+                            const size_t z_in_chunk = k - zmin;
 
-                            last_x = chunk_id_x;
-                            last_y = chunk_id_y;
-                            last_z = chunk_id_z;
-                        }
-
-                        // Shift ranges for cropping
-                        const size_t x_in_chunk_offset = x_in_chunk + chunk_reader->cropstartx;
-                        const size_t y_in_chunk_offset = y_in_chunk + chunk_reader->cropstarty;
-                        const size_t z_in_chunk_offset = z_in_chunk + chunk_reader->cropstartz;
-
-                        // Find sub chunk id from coordinates
-                        sub_chunk_id = chunk_reader->find_index(x_in_chunk_offset, y_in_chunk_offset, z_in_chunk_offset);
-
-                        // Only perform this step if there has been a change in chunk
-                        if (force ||
-                            last_sub != sub_chunk_id)
-                        {
-                            // Replace the chunk id with the new one
-                            if (chunk_identifier != nullptr)
+                            bool force = false;
+                            if (chunk_reader == nullptr ||
+                                chunk_identifier == nullptr ||
+                                last_x != chunk_id_x ||
+                                last_y != chunk_id_y ||
+                                last_z != chunk_id_z ||
+                                last_c != c)
                             {
-                                delete chunk_identifier;
-                            }
-                            chunk_identifier = new std::tuple(c, chunk_id_x, chunk_id_y, chunk_id_z, sub_chunk_id);
+                                force = true;
+                                chunk_reader = get_mchunk(scale, c, chunk_id_x, chunk_id_y, chunk_id_z);
 
-                            // Check if the chunk is in the tmp cache
-                            chunk = chunk_cache[*chunk_identifier];
-                            if (chunk == 0)
-                            {
-                                chunk = chunk_reader->load_chunk(sub_chunk_id);
-                                chunk_cache[*chunk_identifier] = chunk;
+                                last_x = chunk_id_x;
+                                last_y = chunk_id_y;
+                                last_z = chunk_id_z;
                             }
 
-                            // Find the start/stop coordinates of this chunk
-                            cxmin = ((size_t)chunk_reader->chunkx) * (x_in_chunk_offset / ((size_t)chunk_reader->chunkx)); // Minimum value of the chunk
-                            cxmax = std::min((size_t)cxmin + chunk_reader->chunkx, (size_t)chunk_reader->sizex);           // Maximum value of the chunk
-                            cxsize = cxmax - cxmin;                                                                        // Size of the chunk
+                            // Shift ranges for cropping
+                            const size_t x_in_chunk_offset = x_in_chunk + chunk_reader->cropstartx;
+                            const size_t y_in_chunk_offset = y_in_chunk + chunk_reader->cropstarty;
+                            const size_t z_in_chunk_offset = z_in_chunk + chunk_reader->cropstartz;
 
-                            cymin = ((size_t)chunk_reader->chunky) * (y_in_chunk_offset / ((size_t)chunk_reader->chunky));
-                            cymax = std::min((size_t)cymin + chunk_reader->chunky, (size_t)chunk_reader->sizey);
-                            cysize = cymax - cymin;
+                            // Find sub chunk id from coordinates
+                            sub_chunk_id = chunk_reader->find_index(x_in_chunk_offset, y_in_chunk_offset, z_in_chunk_offset);
 
-                            czmin = ((size_t)chunk_reader->chunkz) * (z_in_chunk_offset / ((size_t)chunk_reader->chunkz));
-                            czmax = std::min((size_t)czmin + chunk_reader->chunkz, (size_t)chunk_reader->sizez);
-                            czsize = czmax - czmin;
+                            // Only perform this step if there has been a change in chunk
+                            if (force ||
+                                last_sub != sub_chunk_id)
+                            {
+                                // Replace the chunk id with the new one
+                                if (chunk_identifier != nullptr)
+                                {
+                                    delete chunk_identifier;
+                                }
+                                chunk_identifier = new std::tuple(c, chunk_id_x, chunk_id_y, chunk_id_z, sub_chunk_id);
 
-                            // Store this ID as the most recent chunk
-                            last_sub = sub_chunk_id;
-                            last_c = c;
+                                // Check if the chunk is in the tmp cache
+                                chunk = chunk_cache[*chunk_identifier];
+                                if (chunk == 0)
+                                {
+                                    chunk = chunk_reader->load_chunk(sub_chunk_id);
+                                    chunk_cache[*chunk_identifier] = chunk;
+                                }
+
+                                // Find the start/stop coordinates of this chunk
+                                cxmin = ((size_t)chunk_reader->chunkx) * (x_in_chunk_offset / ((size_t)chunk_reader->chunkx)); // Minimum value of the chunk
+                                cxmax = std::min((size_t)cxmin + chunk_reader->chunkx, (size_t)chunk_reader->sizex);           // Maximum value of the chunk
+                                cxsize = cxmax - cxmin;                                                                        // Size of the chunk
+
+                                cymin = ((size_t)chunk_reader->chunky) * (y_in_chunk_offset / ((size_t)chunk_reader->chunky));
+                                cymax = std::min((size_t)cymin + chunk_reader->chunky, (size_t)chunk_reader->sizey);
+                                cysize = cymax - cymin;
+
+                                czmin = ((size_t)chunk_reader->chunkz) * (z_in_chunk_offset / ((size_t)chunk_reader->chunkz));
+                                czmax = std::min((size_t)czmin + chunk_reader->chunkz, (size_t)chunk_reader->sizez);
+                                czsize = czmax - czmin;
+
+                                // Store this ID as the most recent chunk
+                                last_sub = sub_chunk_id;
+                                last_c = c;
+                            }
+
+                            // Calculate the coordinates of the input and output inside their respective buffers
+                            const size_t coffset = ((x_in_chunk_offset - cxmin) * cysize * czsize) + // X
+                                                ((y_in_chunk_offset - cymin) * czsize) +          // Y
+                                                (z_in_chunk_offset - czmin);                      // Z
+
+                            const size_t ooffset = (c * osizey * osizex * osizez) + // C
+                                                ((k - zs) * osizey * osizex) +   // Z
+                                                ((j - ys) * osizex) +            // Y
+                                                ((i - xs));                      // X
+
+                            out_buffer[ooffset] = chunk[coffset];
                         }
-
-                        // Calculate the coordinates of the input and output inside their respective buffers
-                        const size_t coffset = ((x_in_chunk_offset - cxmin) * cysize * czsize) + // X
-                                               ((y_in_chunk_offset - cymin) * czsize) +          // Y
-                                               (z_in_chunk_offset - czmin);                      // Z
-
-                        const size_t ooffset = (c * osizey * osizex * osizez) + // C
-                                               ((k - zs) * osizey * osizex) +   // Z
-                                               ((j - ys) * osizex) +            // Y
-                                               ((i - xs));                      // X
-
-                        out_buffer[ooffset] = chunk[coffset];
                     }
                 }
             }
-        }
 
-        if (chunk_identifier != nullptr)
-        {
-            delete chunk_identifier;
-        }
+            if (chunk_identifier != nullptr)
+            {
+                delete chunk_identifier;
+            }
 
-        for (auto it = chunk_cache.begin(); it != chunk_cache.end(); it++)
-        {
-            free(it->second);
+            for (auto it = chunk_cache.begin(); it != chunk_cache.end(); it++)
+            {
+                free(it->second);
+            }
+        } else if (type == ZARR) {
+            tensorstore::Context context = tensorstore::Context::Default();
+            auto store_future = tensorstore::Open({{"driver", "zarr3"},
+                                                   {"kvstore", {{"driver", "file"}, {"path", fname}}}},
+                                                   context, tensorstore::OpenMode::open, tensorstore::ReadWriteMode::read);
+
+            auto store_result = store_future.result();
+
+            if (!store_result.ok())
+            {
+                std::cerr << "Error opening TensorStore: " << store_result.status() << std::endl;
+            }
+            else
+            {
+                auto store = std::move(store_result.value());
+
+                const size_t read_buffer_size = osizex * osizey * osizez * sizeof(uint16_t) * channel_count;
+                uint16_t * read_buffer = (uint16_t *) malloc(read_buffer_size);
+                
+                auto array_result = tensorstore::Read<tensorstore::zero_origin>(
+                                 store | tensorstore::AllDims().SizedInterval(
+                                    {(tensorstore::Index)xs, (tensorstore::Index)ys, (tensorstore::Index)zs, 0},
+                                    {(tensorstore::Index)osizex, (tensorstore::Index)osizey, (tensorstore::Index)osizez, (tensorstore::Index)channel_count}
+                                )).result();
+
+                if(array_result.ok()) {
+                        // tensorstore::Array<tensorstore::Shared<void>, -1, tensorstore::ArrayOriginKind::offset, tensorstore::ContainerKind::container>
+                        auto array = array_result.value();
+
+                        // TODO detect datatype automatically
+                        uint16_t * array_ptr = (uint16_t*) array.data();
+
+                        // std::cout << "s:" << array.num_elements() << std::endl;
+                        // Access example: std::cout << "T: " << array[{xs, ys, zs, 0}] << std::endl;
+
+                        for (size_t c = 0; c < channel_count; c++)
+                        {
+                            for (size_t i = xs; i < xe; i++)
+                            {
+                                for (size_t j = ys; j < ye; j++)
+                                {
+                                    for (size_t k = zs; k < ze; k++)
+                                    {
+                                        // Calculate the coordinates of the input and output inside their respective buffers
+                                        const size_t coffset = ((i - xs) * osizey * osizez * channel_count) + // X
+                                                               ((j - ys) * osizez * channel_count) +          // Y
+                                                               (k - zs) * channel_count + c;                  // Z and C
+
+                                        const size_t ooffset = (c * osizey * osizex * osizez) + // C
+                                                               ((k - zs) * osizey * osizex) +   // Z
+                                                               ((j - ys) * osizex) +            // Y
+                                                               ((i - xs));                      // X
+
+                                        out_buffer[ooffset] = array_ptr[coffset];
+                                    }
+                                }
+                            }
+                        }
+                } else {
+                    std::cerr << "Error reading from TensorStore: " << array_result.status() << std::endl;
+                }
+            }
         }
 
         if (CHUNK_TIMER)
