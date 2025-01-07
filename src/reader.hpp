@@ -465,6 +465,7 @@ public:
 
         auto domain = store.domain();
         auto shape = domain.shape();
+        auto labels = domain.labels();
 
         sizex = 0;
         sizey = 0;
@@ -476,12 +477,16 @@ public:
             switch(i) {
                 case 0: // x
                     sizex = dim;
+                    break;
                 case 1: // y
                     sizey = dim;
+                    break;
                 case 2: // z
                     sizez = dim;
+                    break;
                 case 3: // c
                     channel_count = dim;
+                    break;
             }
 
             i++;
@@ -498,6 +503,40 @@ public:
         resx = 100;
         resy = 100;
         resz = 100;
+
+        auto dim_units_result = store.dimension_units();
+
+        if (!dim_units_result.ok())
+        {
+            std::cerr << "Error reading dimension_units from TensorStore: " << store_result.status() << std::endl;
+        } else {
+            auto dim_units = dim_units_result.value();
+
+            for(size_t i = 0; i < dim_units.size(); i++) {
+                if(dim_units[i].has_value()) {
+                    tensorstore::Unit u = dim_units[i].value();
+
+                    // TODO Verify that unit is nm and scale properly
+                    
+                    switch(i) { 
+                        case 0: // x
+                            resx = u.multiplier;
+                            break;
+                        case 1: // y
+                            resy = u.multiplier;
+                            break;
+                        case 2: // z
+                            resz = u.multiplier;
+                            break;
+                        case 3: // c
+                            // Color does not have a unit
+                            break;
+                    }
+
+                    //std::cout << "Name: " << labels[i] << '\t' << u.to_string() << '\t' << u.base_unit << '\t' << u.multiplier << std::endl;
+                }
+            }
+        }
 
         mchunkx = sizex;
         mchunky = sizey;
