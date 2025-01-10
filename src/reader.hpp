@@ -407,6 +407,7 @@ public:
 
     void print_info()
     {
+        /*
         std::cout << "-----------------------------------" << std::endl;
         std::cout << "Files: " << meta_fname << ", " << data_fname << std::endl;
         std::cout << "dtype = " << dtype << std::endl;
@@ -414,6 +415,11 @@ public:
         std::cout << "Size: " << sizex << ", " << sizey << ", " << sizez << std::endl;
         std::cout << "Tile Counts: " << countx << ", " << county << ", " << countz << std::endl;
         std::cout << "-----------------------------------" << std::endl;
+        */
+
+        std::cout << '[' << data_fname << "] " << " dtype=" << dtype << " chunks=(" << chunkx << ','
+                  << chunky << ',' << chunkz << ") size=(" << sizex << ',' << sizey << ',' << sizez << ") "
+                  << "tile_counts=(" << countx << ',' << county << ',' << countz << ")" << std::endl;
     }
 };
 
