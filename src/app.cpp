@@ -60,7 +60,7 @@ void load_inventory()
 
 			archive_inventory[dset_name] = new archive_reader(froot, SISF);
 
-			std::cout << froot << " -(sisf)-> " << dset_name << std::endl;
+			std::cout << "[SISF] ";
 			archive_inventory[dset_name]->print_info();
 		}
 	}
@@ -78,7 +78,8 @@ void load_inventory()
 
 			archive_inventory[dset_name] = new archive_reader(froot, ZARR);
 
-			std::cout << froot << " -(zarr)-> " << dset_name << std::endl;
+			std::cout << "[ZARR] ";
+			archive_inventory[dset_name]->print_info();
 		}
 	}
 
