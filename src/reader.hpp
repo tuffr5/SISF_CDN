@@ -245,7 +245,7 @@ public:
 
     uint16_t *load_chunk(size_t id, size_t sizex, size_t sizey, size_t sizez)
     {
-        const size_t out_buffer_size = max_chunk_size;
+        const size_t out_buffer_size = sizex*sizey*sizez*sizeof(uint16_t);
         uint16_t *out = (uint16_t *)calloc(out_buffer_size, 1);
         metadata_entry *sel = load_meta_entry(id);
 
@@ -324,8 +324,8 @@ public:
 
             case 2:
                 // Decompress with vidlib
-                read_decomp_buffer_pt = decode_stack_264(chunkx, chunky, chunkz, read_buffer, sel->size);
-                pix_cnt = chunkx * chunky * chunkz;
+                read_decomp_buffer_pt = decode_stack_264(sizex, sizey, sizez, read_buffer, sel->size);
+                pix_cnt = sizex * sizey * sizez;
                 decomp_size = pix_cnt * sizeof(uint16_t);
                 read_decomp_buffer = (char *)pixtype_to_uint16(read_decomp_buffer_pt, pix_cnt);
                 free(read_decomp_buffer_pt);
@@ -333,8 +333,8 @@ public:
 
             case 3:
                 // Decompress with vidlib 2
-                read_decomp_buffer_pt = decode_stack_AV1(chunkx, chunky, chunkz, read_buffer, sel->size);
-                pix_cnt = chunkx * chunky * chunkz;
+                read_decomp_buffer_pt = decode_stack_AV1(sizex, sizey, sizez, read_buffer, sel->size);
+                pix_cnt = sizex * sizey * sizez;
                 decomp_size = pix_cnt * sizeof(uint16_t);
                 read_decomp_buffer = (char *)pixtype_to_uint16(read_decomp_buffer_pt, pix_cnt);
                 free(read_decomp_buffer_pt);
@@ -812,14 +812,6 @@ public:
                                 }
                                 chunk_identifier = new std::tuple(c, chunk_id_x, chunk_id_y, chunk_id_z, sub_chunk_id);
 
-                                // Check if the chunk is in the tmp cache
-                                chunk = chunk_cache[*chunk_identifier];
-                                if (chunk == 0)
-                                {
-                                    chunk = chunk_reader->load_chunk(sub_chunk_id, xsize, ysize, zsize);
-                                    chunk_cache[*chunk_identifier] = chunk;
-                                }
-
                                 // Find the start/stop coordinates of this chunk
                                 cxmin = ((size_t)chunk_reader->chunkx) * (x_in_chunk_offset / ((size_t)chunk_reader->chunkx)); // Minimum value of the chunk
                                 cxmax = std::min((size_t)cxmin + chunk_reader->chunkx, (size_t)chunk_reader->sizex);           // Maximum value of the chunk
@@ -832,6 +824,14 @@ public:
                                 czmin = ((size_t)chunk_reader->chunkz) * (z_in_chunk_offset / ((size_t)chunk_reader->chunkz));
                                 czmax = std::min((size_t)czmin + chunk_reader->chunkz, (size_t)chunk_reader->sizez);
                                 czsize = czmax - czmin;
+
+                                // Check if the chunk is in the tmp cache
+                                chunk = chunk_cache[*chunk_identifier];
+                                if (chunk == 0)
+                                {
+                                    chunk = chunk_reader->load_chunk(sub_chunk_id, cxsize, cysize, czsize);
+                                    chunk_cache[*chunk_identifier] = chunk;
+                                }
 
                                 // Store this ID as the most recent chunk
                                 last_sub = sub_chunk_id;
