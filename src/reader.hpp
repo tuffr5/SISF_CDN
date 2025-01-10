@@ -965,7 +965,7 @@ public:
                   << "tile_counts=(" << mcountx << ',' << mcounty << ',' << mcountz << ") "
                   << "scales=[";
 
-        for(size_t n : scales):
+        for(size_t n : scales)
             std::cout << n << ',';
                   
         std::cout << "]" << std::endl;
