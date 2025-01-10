@@ -243,9 +243,10 @@ public:
     std::mutex chunk_cache_mutex;
     std::deque<std::tuple<size_t, uint16_t *>> chunk_cache;
 
-    uint16_t *load_chunk(size_t id)
+    uint16_t *load_chunk(size_t id, size_t sizex, size_t sizey, size_t sizez)
     {
-        uint16_t *out = (uint16_t *)calloc(max_chunk_size, 1);
+        const size_t out_buffer_size = max_chunk_size;
+        uint16_t *out = (uint16_t *)calloc(out_buffer_size, 1);
         metadata_entry *sel = load_meta_entry(id);
 
         if (sel->size == 0)
@@ -274,7 +275,7 @@ public:
             // Copy from cache
             if (from_cache != 0)
             {
-                memcpy((void *)out, (void *)from_cache, max_chunk_size);
+                memcpy((void *)out, (void *)from_cache, out_buffer_size);
             }
 
             global_chunk_cache_mutex.unlock();
@@ -306,7 +307,7 @@ public:
             }
 
             // Decompress
-            size_t decomp_size;
+            size_t decomp_size, pix_cnt;
             char *read_decomp_buffer;
             pixtype *read_decomp_buffer_pt;
 
@@ -317,22 +318,25 @@ public:
             {
             case 1:
                 // Decompress with ZSTD
-                read_decomp_buffer = (char *)calloc(max_chunk_size, 1);
-                decomp_size = ZSTD_decompress(read_decomp_buffer, max_chunk_size, read_buffer, sel->size);
+                read_decomp_buffer = (char *)calloc(out_buffer_size, 1);
+                decomp_size = ZSTD_decompress(read_decomp_buffer, out_buffer_size, read_buffer, sel->size);
                 break;
 
             case 2:
                 // Decompress with vidlib
                 read_decomp_buffer_pt = decode_stack_264(chunkx, chunky, chunkz, read_buffer, sel->size);
-                read_decomp_buffer = (char *)pixtype_to_uint16(read_decomp_buffer_pt, chunkx * chunky * chunkz);
+                pix_cnt = chunkx * chunky * chunkz;
+                decomp_size = pix_cnt * sizeof(uint16_t);
+                read_decomp_buffer = (char *)pixtype_to_uint16(read_decomp_buffer_pt, pix_cnt);
                 free(read_decomp_buffer_pt);
                 break;
 
             case 3:
                 // Decompress with vidlib 2
                 read_decomp_buffer_pt = decode_stack_AV1(chunkx, chunky, chunkz, read_buffer, sel->size);
-                // read_decomp_buffer = (char *)pixtype_to_uint16_YUV420(read_decomp_buffer_pt, chunkx, chunky, chunkz);
-                read_decomp_buffer = (char *)pixtype_to_uint16(read_decomp_buffer_pt, chunkx * chunky * chunkz);
+                pix_cnt = chunkx * chunky * chunkz;
+                decomp_size = pix_cnt * sizeof(uint16_t);
+                read_decomp_buffer = (char *)pixtype_to_uint16(read_decomp_buffer_pt, pix_cnt);
                 free(read_decomp_buffer_pt);
                 break;
             }
@@ -340,16 +344,19 @@ public:
             free(read_buffer);
 
             // Copy result
-            memcpy((void *)out, (void *)read_decomp_buffer, max_chunk_size);
+            memcpy((void *)out, (void *)read_decomp_buffer, decomp_size);
 
             if (global_chunk_cache_mutex.try_lock_for(cache_lock_timeout))
             {
-                if (global_chunk_cache[global_chunk_cache_last].ptr != 0)
-                    free(global_chunk_cache[global_chunk_cache_last].ptr);
+                global_chunk_line * cache_line = global_chunk_cache + global_chunk_cache_last;
 
-                global_chunk_cache[global_chunk_cache_last].chunk = (size_t)id;
-                global_chunk_cache[global_chunk_cache_last].mchunk = (size_t)this_mchunk_id;
-                global_chunk_cache[global_chunk_cache_last].ptr = (uint16_t *)read_decomp_buffer;
+                if (cache_line->ptr != 0) {
+                    free(cache_line->ptr);
+                }
+
+                cache_line->chunk = (size_t)id;
+                cache_line->mchunk = (size_t)this_mchunk_id;
+                cache_line->ptr = (uint16_t *)read_decomp_buffer;
 
                 global_chunk_cache_last++;
                 if (global_chunk_cache_last == global_cache_size)
@@ -389,7 +396,7 @@ public:
 
         const size_t chunk_id = find_index(i, j, k);
 
-        uint16_t *chunk = load_chunk(chunk_id);
+        uint16_t *chunk = load_chunk(chunk_id, xsize, ysize, zsize);
 
         const uint16_t out = chunk[coffset];
 
@@ -809,7 +816,7 @@ public:
                                 chunk = chunk_cache[*chunk_identifier];
                                 if (chunk == 0)
                                 {
-                                    chunk = chunk_reader->load_chunk(sub_chunk_id);
+                                    chunk = chunk_reader->load_chunk(sub_chunk_id, xsize, ysize, zsize);
                                     chunk_cache[*chunk_identifier] = chunk;
                                 }
 

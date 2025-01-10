@@ -1552,7 +1552,7 @@ int main(int argc, char *argv[])
 
 						if (chunk == 0)
 						{
-							chunk = chunk_reader->load_chunk(sub_chunk_id);
+							chunk = chunk_reader->load_chunk(sub_chunk_id, xsize, ysize, zsize);
 							chunk_cache[sub_chunk_id] = chunk;
 						}
 
