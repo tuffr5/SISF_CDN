@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  cdn:
+    build:
+      context: .
+      args:
+        CDN_PORT: 6000
+        BUILD_THREAD: 64
+    ports:
+      - "8000:6000"
+    volumes:
+      - /sonic/duanb/data:/data
+    restart: unless-stopped
+
+volumes:
+  data:
+    driver: local

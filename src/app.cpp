@@ -452,7 +452,7 @@ int main(int argc, char *argv[])
 			}
 			toadd << "</td>\n";
 
-			toadd << "\t<td>" << "precomputed://https://ntracer2.cai-lab.org/data2/" << kvpair.first << "</td>\n";
+			toadd << "\t<td>" << "precomputed://https://sonic.cai-lab.org/data/" << kvpair.first << "</td>\n";
 			toadd << "</tr>\n";
 
 			sample_table[this_name] = toadd.str();
@@ -1197,6 +1197,116 @@ int main(int argc, char *argv[])
 		int neuron_id = stoi(a[0][0]);
 
 		std::cout << "Added Neuron " << neuron_id << std::endl;
+
+		///////////////////////
+
+		std::map<int64_t, int64_t> old_to_new;
+		old_to_new.insert( {-1, -1} );
+		std::list<swc_line_input> lines;
+		std::list<std::tuple<int, int>> edges;
+
+		int id, parent, type;
+		float x, y, z, r;
+
+		// id   type   X       Y         Z      R   parent
+		// 16613 2 4341.180 5706.911 9866.430 1.000 16612
+		uint32_t i = 1;
+		std::string line;
+		std::istringstream infile(msg.parts[part_id].body);
+		while (std::getline(infile, line))
+		{
+			if (line.length() <= 1)
+				continue;
+			std::istringstream iss(line);
+
+			iss >> id;
+			iss >> type;
+			iss >> x;
+			iss >> y;
+			iss >> z;
+			iss >> r;
+			iss >> parent;
+
+			lines.push_back({type, x, y, z, r, parent});
+			old_to_new.insert({id, i});
+
+			i++;
+		}
+
+		std::stringstream sql_builder("");
+
+		sql_builder << "INSERT INTO SWC"
+					<< "(I,NEURONID,PARENTID,X,Y,Z,R,T,USERID)"
+					<< " VALUES ";
+
+		i = 1;
+		for (swc_line_input a : lines)
+		{
+			const auto [type, x, y, z, r, parent] = a;
+			int64_t parent_new = old_to_new[parent];
+			// std::cout << x << '\t' << y << '\t' << z << '\t' << r << '\t' << parent_new << std::endl;
+
+			int user = -1;
+			sql_builder << "(" << i << ","
+						<< neuron_id << ","
+						<< parent_new << ","
+						<< x << ',' << y << ',' << z << ',' << r << ',' << type << ',' << user
+						<< "),";
+			i++;
+		}
+
+		sql_builder.seekp(-1,sql_builder.cur);
+		sql_builder << ";";
+
+		{
+			auto db = database_interface(trace_file[0]);
+			db.run(sql_builder.str());
+		}
+
+		json response = {
+			{"neuronid", neuron_id}
+		};
+
+		return crow::response( response.dump() ); });
+
+	CROW_ROUTE(app, "/<string>/skeleton_api/upload/<int>").methods("POST"_method)([](const crow::request &req, std::string data_id, int neuron_id)
+																				{
+		if(READ_ONLY_MODE) {
+			return crow::response(crow::status::BAD_REQUEST);
+		}
+
+		data_id = str_first(data_id, '+');
+
+		crow::multipart::message msg(req);
+
+		int part_id = -1;
+		for(int i = 0; i < msg.parts.size(); i++) {
+			for (auto& item_h : msg.parts[i].headers)
+			{
+				for (auto& it : item_h.second.params)
+				{
+					if(it.first == "name" && it.second == "data") { // Identify the part with the data
+						part_id = i;
+					}
+				}
+			}
+		}
+
+		if(part_id == -1) {
+			std::cerr << "Failed to find file header." << std::endl;
+			return crow::response(crow::status::BAD_REQUEST);
+		}
+
+		std::vector<std::string> trace_file = glob_tool(DATA_PATH + data_id + "/traces.sql");
+
+		if(trace_file.size() == 0) {
+			std::cerr << "Failed to find sql file." << std::endl;
+			return crow::response(crow::status::BAD_REQUEST);
+		}
+		
+		std::cout << "Loading file: " << trace_file[0] << std::endl; 
+
+		std::cout << "Adding Neuron " << neuron_id << std::endl;
 
 		///////////////////////
 
