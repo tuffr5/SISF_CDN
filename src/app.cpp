@@ -84,8 +84,6 @@ void load_inventory()
 	}
 
 	std::cout << "|====================================================|" << std::endl;
-
-
 }
 
 void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, size_t> data_shape, size_t channel_count, std::string filter_name, std::string filter_param)
@@ -126,7 +124,7 @@ void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, siz
 		for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
 		{
 			float v = data[i];
-			
+
 			v /= std::numeric_limits<uint16_t>::max();
 			v = log(v);
 			v *= gamma;
@@ -267,6 +265,96 @@ void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, siz
 
 		free(data_tmp);
 	}
+}
+
+template <typename T>
+T *compute_z_max_projection(
+	T *input_buffer,
+	size_t x_size, size_t y_size, size_t z_size,
+	size_t channel_count,
+	int num_zslices)
+{
+	// Input validation
+	if (!input_buffer || x_size == 0 || y_size == 0 || z_size == 0 ||
+		channel_count == 0 || num_zslices > z_size || num_zslices == 0)
+	{
+		return nullptr;
+	}
+
+	size_t out_z_size = z_size - num_zslices + 1;
+	size_t xy_plane_size = x_size * y_size;
+
+	// Check for potential overflow
+	if (xy_plane_size / x_size != y_size)
+	{
+		return nullptr;
+	}
+
+	size_t output_size = xy_plane_size * out_z_size * channel_count;
+	if (output_size / xy_plane_size != out_z_size * channel_count)
+	{
+		return nullptr;
+	}
+
+	T *output_buffer = (T *)malloc(output_size * sizeof(T));
+	if (!output_buffer)
+	{
+		return nullptr;
+	}
+
+	for (size_t c = 0; c < channel_count; c++)
+	{
+		std::vector<T> current_maxima(xy_plane_size, 0);
+
+		for (size_t z = 0; z < num_zslices; z++)
+		{
+			for (size_t xy = 0; xy < xy_plane_size; xy++)
+			{
+				size_t input_idx = (z * xy_plane_size * channel_count) +
+								   (xy * channel_count) + c;
+				current_maxima[xy] = std::max(current_maxima[xy], input_buffer[input_idx]);
+			}
+		}
+
+		for (size_t z = 0; z < out_z_size; z++)
+		{
+			for (size_t xy = 0; xy < xy_plane_size; xy++)
+			{
+				size_t output_idx = (z * xy_plane_size * channel_count) +
+									(xy * channel_count) + c;
+				output_buffer[output_idx] = current_maxima[xy];
+			}
+
+			if (z < out_z_size - 1)
+			{
+				size_t new_z = z + num_zslices;
+				for (size_t xy = 0; xy < xy_plane_size; xy++)
+				{
+					size_t first_idx = (z * xy_plane_size * channel_count) +
+									   (xy * channel_count) + c;
+					if (current_maxima[xy] == input_buffer[first_idx])
+					{
+						current_maxima[xy] = 0;
+						for (size_t z_offset = 1; z_offset < num_zslices; z_offset++)
+						{
+							size_t check_z = z + z_offset;
+							size_t check_idx = (check_z * xy_plane_size * channel_count) +
+											   (xy * channel_count) + c;
+							current_maxima[xy] = std::max(current_maxima[xy],
+														  input_buffer[check_idx]);
+						}
+					}
+
+					size_t new_idx = (new_z * xy_plane_size * channel_count) +
+									 (xy * channel_count) + c;
+					current_maxima[xy] = std::max(current_maxima[xy],
+												  input_buffer[new_idx]);
+				}
+			}
+		}
+	}
+
+	return output_buffer;
 }
 
 int main(int argc, char *argv[])
@@ -530,6 +618,69 @@ int main(int argc, char *argv[])
 
 		res.write(response.dump());
     	res.end(); });
+
+	// ENDPOINT: /data/<string>/zmaxprojection/num_zslices/info
+	CROW_ROUTE(app, "/<string>/zmaxprojection/<int>/info")
+	([](crow::response &res, std::string data_id, int num_zslices)
+	 {
+			data_id = str_first(data_id, '+');
+			auto archive_search = archive_inventory.find(data_id);
+	
+			if(archive_search == archive_inventory.end()) {
+				res.end("File not found.");
+				return;
+			}
+	
+			archive_reader * reader = archive_search->second;
+	
+			std::vector<basic_json> scales;
+			for(size_t scale : reader->scales) {
+				std::tuple<size_t, size_t, size_t> res_scaled = reader->get_res(scale);
+				std::vector<uint32_t> res = {
+					(uint32_t) std::get<0>(res_scaled),
+					(uint32_t) std::get<1>(res_scaled),
+					(uint32_t) std::get<2>(res_scaled)
+				};
+	
+				basic_json to_add;
+				
+				to_add["chunk_sizes"] = {
+					//{64, 1, 1},
+					//{1, 64, 1},
+					//{1, 1, 64}
+					{256, 256, 1 },
+					{256, 1,   256},
+					{1,   256, 256},
+					{32, 32, 32},
+	
+				};
+	
+				to_add["encoding"] = "raw";
+				to_add["key"] = std::to_string(scale);
+				to_add["resolution"] = res;
+	
+				std::tuple<size_t, size_t, size_t> sizes = reader->get_size(scale);
+				to_add["size"] = {
+					std::get<0>(sizes),
+					std::get<1>(sizes),
+					std::get<2>(sizes)
+				};
+				to_add["voxel_offset"] = {0,0,0};
+				to_add["num_zslices"] = std::to_string(num_zslices);
+	
+				scales.push_back(to_add);
+			}
+	
+			json response = {
+				{"type", "image"},
+				{"@type", "neuroglancer_multiscale_volume"},
+				{"data_type", "uint16"}, // TODO change based on dtype
+				{"num_channels", reader->channel_count}
+			};
+			response["scales"] = scales;
+	
+			res.write(response.dump());
+			res.end(); });
 
 	CROW_ROUTE(app, "/<string>/tracing/<string>/<string>")
 	([](const crow::request &req, crow::response &res, std::string data_id, std::string pt_in_s1, std::string pt_in_s2)
@@ -1270,7 +1421,7 @@ int main(int argc, char *argv[])
 		return crow::response( response.dump() ); });
 
 	CROW_ROUTE(app, "/<string>/skeleton_api/upload/<int>").methods("POST"_method)([](const crow::request &req, std::string data_id, int neuron_id)
-																				{
+																				  {
 		if(READ_ONLY_MODE) {
 			return crow::response(crow::status::BAD_REQUEST);
 		}
@@ -1709,6 +1860,105 @@ int main(int argc, char *argv[])
 		free(out_buffer);
 
 		res.end(); });
+
+	CROW_ROUTE(app, "/<string>/zmaxprojection/<int>/<string>/<string>")
+	([](crow::response &res, std::string data_id, int num_zslices, std::string resolution_id,
+		std::string tile_key)
+		{
+		auto begin = now();
+		
+		std::vector<std::string> data_id_parts = str_split(data_id, '+');
+		std::vector<std::pair<std::string, std::string>> filters;
+
+		if(data_id_parts.size() == 2) {
+			std::string filter_params = data_id_parts[1];
+			std::vector<std::string> filter_keys = str_split(filter_params, '&');
+			for(auto filter_key : filter_keys) {
+				std::vector<std::string> filter_parsed = str_split(filter_key, '=');
+				if(filter_parsed.size() == 2) {
+					filters.push_back({filter_parsed[0], filter_parsed[1]});
+				}
+			}
+		}
+
+		data_id = data_id_parts[0];
+		auto archive_search = archive_inventory.find(data_id);
+		if(archive_search == archive_inventory.end()) {
+			res.end();
+			return;
+		}
+
+		archive_reader* reader = archive_search->second;
+
+		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
+		sscanf(tile_key.c_str(), "%u-%u_%u-%u_%u-%u", &x_begin, &x_end, &y_begin, &y_end, &z_begin, &z_end);
+
+		size_t chunk_sizes[3] = {x_end - x_begin, y_end - y_begin, z_end - z_begin};
+		size_t scale = stoi(resolution_id);
+		int scaled_num_zslices = std::max(1, num_zslices / stoi(resolution_id));
+		size_t scaled_sizez = std::get<2>(reader->get_size(scale));
+
+		uint16_t* input_buffer = nullptr;
+		uint16_t* projected_buffer = nullptr;
+		
+		if ((scaled_num_zslices <= 1) || (scaled_sizez < z_end + scaled_num_zslices - 1)) {
+			projected_buffer = reader->load_region(
+				scale,
+				x_begin, x_end,
+				y_begin, y_end,
+				z_begin, z_end
+			);
+		} else {
+			input_buffer = reader->load_region(
+				scale,
+				x_begin, x_end,
+				y_begin, y_end,
+				z_begin, z_end + scaled_num_zslices - 1
+			);
+
+			// Compute z-maximum projection
+			projected_buffer = compute_z_max_projection<uint16_t>(
+				input_buffer,
+				chunk_sizes[0], chunk_sizes[1], chunk_sizes[2] + scaled_num_zslices - 1,
+				reader->channel_count,
+				scaled_num_zslices
+			);
+		}
+
+		if (!projected_buffer) {
+			if (input_buffer) {
+				free(input_buffer);
+			}
+			res.code = 500;
+			res.end("Failed to create projection");
+			return;
+		}
+
+		size_t projected_buffer_size = sizeof(uint16_t) * chunk_sizes[0] * chunk_sizes[1] * 
+									chunk_sizes[2] * reader->channel_count;
+
+		// Apply filters if needed
+		for(const auto& pair : filters) {
+			filter_run(
+				projected_buffer,
+				projected_buffer_size,
+				{chunk_sizes[0], chunk_sizes[1], chunk_sizes[2]},
+				reader->channel_count,
+				pair.first,
+				pair.second
+			);
+		}
+
+		res.body = std::string((char*)projected_buffer, projected_buffer_size);
+
+		if (input_buffer) {
+			free(input_buffer);
+		}
+		free(projected_buffer);
+
+		res.end();
+		
+		log_time(data_id, "READ_ZMAX", scale, x_end-x_begin, y_end-y_begin, z_end-z_begin, begin); });
 
 	// @app.route("/data/<data_id>/<resolution>/<key>-<key>-<key>")
 	// This has to be last in the route list because it acts as a wildcard
