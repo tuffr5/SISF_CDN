@@ -1094,6 +1094,64 @@ int main(int argc, char *argv[])
 
 		return crow::response(req.body); });
 
+	CROW_ROUTE(app, "/<string>/skeleton_api")([](std::string data_id)
+											  {
+		
+		data_id = str_first(data_id, '+');
+	
+		std::string trace_file_path = DATA_PATH + data_id + "/traces.sql";
+		std::vector<std::string> trace_file = glob_tool(trace_file_path);
+	
+		bool file_created = false;
+		
+		if(trace_file.size() == 0) {
+			std::cout << "Trace file not found. Creating a new one." << std::endl;
+			
+			// Create a new trace file (assuming DATA_PATH + data_id directory already exists)
+			trace_file.push_back(trace_file_path);
+			file_created = true;
+			
+			// Initialize database with required tables
+			auto db = database_interface(trace_file[0]);
+			
+			// Create SWC table
+			db.run(R"(
+				CREATE TABLE IF NOT EXISTS SWC(
+					I INT                  NOT NULL,
+					NEURONID INT           NOT NULL,
+					PARENTID INT           NOT NULL,
+					X REAL                 NOT NULL,
+					Y REAL                 NOT NULL,
+					Z REAL                 NOT NULL,
+					R REAL                 NOT NULL,
+					T INT                  NOT NULL,
+					USERID INT             NOT NULL,
+					TIMESTAMP DATETIME DEFAULT CURRENT_TIMESTAMP
+				);
+			)");
+			
+			// Create NEURONS table
+			db.run(R"(
+				CREATE TABLE IF NOT EXISTS NEURONS(
+					SOMAX REAL,
+					SOMAY REAL,
+					SOMAZ REAL,
+					CELLTYPE INT,
+					NOTES TEXT,
+					TIMESTAMP DATETIME DEFAULT CURRENT_TIMESTAMP
+				);
+			)");
+			
+			std::cout << "Database tables created successfully." << std::endl;
+		}
+		
+		json response = {};
+		
+		// Add status to indicate if file was created
+		response["status"] = file_created ? "file_created" : "file_found";
+		
+		return crow::response(response.dump()); });
+
 	CROW_ROUTE(app, "/<string>/skeleton_api/delete/<int>")
 	([](std::string data_id, int neuron_id)
 	 {
