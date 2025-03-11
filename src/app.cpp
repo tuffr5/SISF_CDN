@@ -40,7 +40,6 @@ std::string SERVER_ROOT = "https://server/";
 const std::string VERSION_STRING = "V0-6-0";
 
 using json = nlohmann::json;
-using json = nlohmann::json;
 
 typedef std::tuple<float, float, float, float, int> swc_line;
 typedef std::tuple<int, float, float, float, float, int> swc_line_input;
