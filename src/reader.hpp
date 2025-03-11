@@ -470,6 +470,11 @@ public:
 
     void load_protection()
     {
+        std::vector<std::string> fnames = glob_tool(std::string(fname + "/*.htaccess"));
+
+        if(fnames.size() > 0) {
+            this->is_protected = true;
+        }
     }
 
     void load_metadata_zarr()
