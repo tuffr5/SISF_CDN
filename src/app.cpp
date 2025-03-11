@@ -495,14 +495,10 @@ int main(int argc, char *argv[])
 
 			basic_json to_add;
 			to_add["chunk_sizes"] = {
-				//{64, 1, 1},
-				//{1, 64, 1},
-				//{1, 1, 64}
 				{256, 256, 1  },
 				{256, 1,   256},
 				{1,   256, 256},
 				{32, 32, 32},
-
 			};
 
 			to_add["encoding"] = "raw";
