@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause AND ISC AND MIT
 /*BSD 3-Clause License
 
 Copyright (c) 2014-2017, ipkn
@@ -309,7 +310,7 @@ inline size_t qs_parse(char* qs, char* qs_kv[], size_t qs_kv_size, bool parse_ur
 #endif
 
     return i;
-    }
+}
 
 
 inline int qs_decode(char * qs)
@@ -466,9 +467,7 @@ namespace crow
     public:
         static const int MAX_KEY_VALUE_PAIRS_COUNT = 256;
 
-        query_string()
-        {
-        }
+        query_string() = default;
 
         query_string(const query_string& qs):
           url_(qs.url_)
@@ -490,7 +489,7 @@ namespace crow
             return *this;
         }
 
-        query_string& operator=(query_string&& qs)
+        query_string& operator=(query_string&& qs) noexcept
         {
             key_value_pairs_ = std::move(qs.key_value_pairs_);
             char* old_data = (char*)qs.url_.c_str();
@@ -510,9 +509,10 @@ namespace crow
                 return;
 
             key_value_pairs_.resize(MAX_KEY_VALUE_PAIRS_COUNT);
-
             size_t count = qs_parse(&url_[0], &key_value_pairs_[0], MAX_KEY_VALUE_PAIRS_COUNT, url);
+
             key_value_pairs_.resize(count);
+            key_value_pairs_.shrink_to_fit();
         }
 
         void clear()
@@ -643,13 +643,19 @@ namespace crow
 
         std::vector<std::string> keys() const
         {
-            std::vector<std::string> ret;
-            for (auto element : key_value_pairs_)
+            std::vector<std::string> keys;
+            keys.reserve(key_value_pairs_.size());
+
+            for (const char* const element : key_value_pairs_)
             {
-                std::string str_element(element);
-                ret.emplace_back(str_element.substr(0, str_element.find('=')));
+                const char* delimiter = strchr(element, '=');
+                if (delimiter)
+                    keys.emplace_back(element, delimiter);
+                else
+                    keys.emplace_back(element);
             }
-            return ret;
+
+            return keys;
         }
 
     private:
@@ -665,7 +671,7 @@ namespace crow
 #include <zlib.h>
 
 // http://zlib.net/manual.html
-namespace crow
+namespace crow // NOTE: Already documented in "crow/app.h"
 {
     namespace compression
     {
@@ -758,11 +764,7 @@ namespace crow
 
 #endif
 
-/* 
- *
- * TinySHA1 - a header only implementation of the SHA1 algorithm in C++. Based
- * on the implementation in boost::uuid::details.
- * 
+/*
  * SHA1 Wikipedia Page: http://en.wikipedia.org/wiki/SHA-1
  * 
  * Copyright (c) 2012-22 SAURAV MOHAPATRA <mohaps@gmail.com>
@@ -779,14 +781,35 @@ namespace crow
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
+
+/** 
+ * \file TinySHA1.hpp
+ * \author SAURAV MOHAPATRA <mohaps@gmail.com>
+ * \date 2012-22
+ * \brief TinySHA1 - a header only implementation of the SHA1 algorithm in C++. Based
+ * on the implementation in boost::uuid::details.
+ *
+ * In this file are defined:
+ * - sha1::SHA1
+ */
 #ifndef _TINY_SHA1_HPP_
 #define _TINY_SHA1_HPP_
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdint.h>
+
+/**
+ * \namespace sha1
+ * \brief Here is defined the SHA1 class
+ */
 namespace sha1
 {
+	/**
+	 * \class SHA1
+	 * \brief A tiny SHA1 algorithm implementation used internally in the
+	 * Crow server (specifically in crow/websocket.h).
+	 */
 	class SHA1
 	{
 	public:
@@ -1022,21 +1045,38 @@ namespace sha1
 #endif
 #endif
 
+
+#ifdef CROW_USE_BOOST
+#include <boost/asio.hpp>
+#include <boost/asio/version.hpp>
+#ifdef CROW_ENABLE_SSL
+#include <boost/asio/ssl.hpp>
+#endif
+#else
 #ifndef ASIO_STANDALONE
 #define ASIO_STANDALONE
 #endif
 #include <asio.hpp>
+#include <asio/version.hpp>
 #ifdef CROW_ENABLE_SSL
 #include <asio/ssl.hpp>
 #endif
-#include <asio/version.hpp>
-#if ASIO_VERSION >= 101300 // 1.13.0
+#endif
+
+#if (CROW_USE_BOOST && BOOST_VERSION >= 107000) || (ASIO_VERSION >= 101300)
 #define GET_IO_SERVICE(s) ((asio::io_context&)(s).get_executor().context())
 #else
 #define GET_IO_SERVICE(s) ((s).get_io_service())
 #endif
+
 namespace crow
 {
+#ifdef CROW_USE_BOOST
+    namespace asio = boost::asio;
+    using error_code = boost::system::error_code;
+#else
+    using error_code = asio::error_code;
+#endif
     using tcp = asio::ip::tcp;
 
     /// A wrapper for the asio::ip::tcp::socket and asio::ssl::stream
@@ -1076,32 +1116,32 @@ namespace crow
 
         void close()
         {
-            asio::error_code ec;
+            error_code ec;
             socket_.close(ec);
         }
 
         void shutdown_readwrite()
         {
-            asio::error_code ec;
+            error_code ec;
             socket_.shutdown(asio::socket_base::shutdown_type::shutdown_both, ec);
         }
 
         void shutdown_write()
         {
-            asio::error_code ec;
+            error_code ec;
             socket_.shutdown(asio::socket_base::shutdown_type::shutdown_send, ec);
         }
 
         void shutdown_read()
         {
-            asio::error_code ec;
+            error_code ec;
             socket_.shutdown(asio::socket_base::shutdown_type::shutdown_receive, ec);
         }
 
         template<typename F>
         void start(F f)
         {
-            f(asio::error_code());
+            f(error_code());
         }
 
         tcp::socket socket_;
@@ -1141,7 +1181,7 @@ namespace crow
         {
             if (is_open())
             {
-                asio::error_code ec;
+                error_code ec;
                 raw_socket().close(ec);
             }
         }
@@ -1150,7 +1190,7 @@ namespace crow
         {
             if (is_open())
             {
-                asio::error_code ec;
+                error_code ec;
                 raw_socket().shutdown(asio::socket_base::shutdown_type::shutdown_both, ec);
             }
         }
@@ -1159,7 +1199,7 @@ namespace crow
         {
             if (is_open())
             {
-                asio::error_code ec;
+                error_code ec;
                 raw_socket().shutdown(asio::socket_base::shutdown_type::shutdown_send, ec);
             }
         }
@@ -1168,7 +1208,7 @@ namespace crow
         {
             if (is_open())
             {
-                asio::error_code ec;
+                error_code ec;
                 raw_socket().shutdown(asio::socket_base::shutdown_type::shutdown_receive, ec);
             }
         }
@@ -1182,7 +1222,7 @@ namespace crow
         void start(F f)
         {
             ssl_socket_->async_handshake(asio::ssl::stream_base::server,
-                                         [f](const asio::error_code& ec) {
+                                         [f](const error_code& ec) {
                                              f(ec);
                                          });
         }
@@ -1204,6 +1244,7 @@ namespace crow
 #include <sstream>
 #include <unordered_map>
 #include <random>
+#include <algorithm>
 
 
 #if defined(CROW_CAN_USE_CPP17) && !defined(CROW_FILESYSTEM_IS_EXPERIMENTAL)
@@ -1894,6 +1935,14 @@ namespace crow
             return base64decode(data.data(), data.length());
         }
 
+        inline static std::string normalize_path(const std::string& directoryPath)
+        {
+            std::string normalizedPath = directoryPath;
+            std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
+            if (!normalizedPath.empty() && normalizedPath.back() != '/')
+                normalizedPath += '/';
+            return normalizedPath;
+        }
 
         inline static void sanitize_filename(std::string& data, char replacement = '_')
         {
@@ -1907,8 +1956,8 @@ namespace crow
             // a special device. Thus we search for the string (case-insensitive), and then check if the string ends or if
             // is has a dangerous follow up character (.:\/)
             auto sanitizeSpecialFile = [](std::string& source, unsigned ofs, const char* pattern, bool includeNumber, char replacement) {
-	      unsigned i = ofs;
-	      size_t len = source.length();
+                unsigned i = ofs;
+                size_t len = source.length();
                 const char* p = pattern;
                 while (*p)
                 {
@@ -2322,6 +2371,7 @@ namespace crow
         FORBIDDEN                     = 403,
         NOT_FOUND                     = 404,
         METHOD_NOT_ALLOWED            = 405,
+        NOT_ACCEPTABLE                = 406,
         PROXY_AUTHENTICATION_REQUIRED = 407,
         CONFLICT                      = 409,
         GONE                          = 410,
@@ -2486,14 +2536,22 @@ constexpr crow::HTTPMethod operator"" _method(const char* str, size_t /*len*/)
 // clang-format on
 
 
+#ifdef CROW_USE_BOOST
+#include <boost/asio.hpp>
+#else
 #ifndef ASIO_STANDALONE
 #define ASIO_STANDALONE
 #endif
 #include <asio.hpp>
+#endif
 
 
-namespace crow
+namespace crow // NOTE: Already documented in "crow/app.h"
 {
+#ifdef CROW_USE_BOOST
+    namespace asio = boost::asio;
+#endif
+
     /// Find and return the value associated with the key. (returns an empty string if nothing is found)
     template<typename T>
     inline const std::string& get_header_value(const T& headers, const std::string& key)
@@ -4118,7 +4176,14 @@ reexecute:
 
         switch (parser->header_state) {
           case h_upgrade:
-            parser->flags |= F_UPGRADE;
+            // Crow does not support HTTP/2 at the moment.
+            // According to the RFC https://datatracker.ietf.org/doc/html/rfc7540#section-3.2
+            // "A server that does not support HTTP/2 can respond to the request as though the Upgrade header field were absent"
+            // => `F_UPGRADE` is not set if the header starts by "h2".
+            // This prevents the parser from skipping the request body.
+            if (ch != 'h' || p+1 == (data + len) || *(p+1) != '2') {
+              parser->flags |= F_UPGRADE;
+            }
             parser->header_state = h_general;
             break;
 
@@ -5229,13 +5294,14 @@ namespace crow
 #include <memory>
 #include <vector>
 #include <cmath>
+#include <cfloat>
 
 
 using std::isinf;
 using std::isnan;
 
 
-namespace crow
+namespace crow // NOTE: Already documented in "crow/app.h"
 {
     namespace mustache
     {
@@ -5316,7 +5382,8 @@ namespace crow
             Signed_integer,
             Unsigned_integer,
             Floating_point,
-            Null
+            Null,
+            Double_precision_floating_point
         };
 
         class rvalue;
@@ -5992,6 +6059,7 @@ namespace crow
                         switch (r.nt())
                         {
                             case num_type::Floating_point: os << r.d(); break;
+                            case num_type::Double_precision_floating_point: os << r.d(); break;
                             case num_type::Signed_integer: os << r.i(); break;
                             case num_type::Unsigned_integer: os << r.u(); break;
                             case num_type::Null: throw std::runtime_error("Number with num_type Null");
@@ -6529,7 +6597,9 @@ namespace crow
                   ui(value) {}
                 constexpr number(std::int64_t value) noexcept:
                   si(value) {}
-                constexpr number(double value) noexcept:
+                explicit constexpr number(double value) noexcept:
+                  d(value) {}
+                explicit constexpr number(float value) noexcept:
                   d(value) {}
             } num;                                      ///< Value if type is a number.
             std::string s;                              ///< Value if type is a string.
@@ -6568,7 +6638,7 @@ namespace crow
             wvalue(float value):
               returnable("application/json"), t_(type::Number), nt(num_type::Floating_point), num(static_cast<double>(value)) {}
             wvalue(double value):
-              returnable("application/json"), t_(type::Number), nt(num_type::Floating_point), num(static_cast<double>(value)) {}
+              returnable("application/json"), t_(type::Number), nt(num_type::Double_precision_floating_point), num(static_cast<double>(value)) {}
 
             wvalue(char const* value):
               returnable("application/json"), t_(type::String), s(value) {}
@@ -6619,7 +6689,7 @@ namespace crow
                         return;
                     case type::Number:
                         nt = r.nt();
-                        if (nt == num_type::Floating_point)
+                        if (nt == num_type::Floating_point || nt == num_type::Double_precision_floating_point)
                             num.d = r.d();
                         else if (nt == num_type::Signed_integer)
                             num.si = r.i();
@@ -6655,7 +6725,7 @@ namespace crow
                         return;
                     case type::Number:
                         nt = r.nt;
-                        if (nt == num_type::Floating_point)
+                        if (nt == num_type::Floating_point || nt == num_type::Double_precision_floating_point)
                             num.d = r.num.d;
                         else if (nt == num_type::Signed_integer)
                             num.si = r.num.si;
@@ -6725,12 +6795,21 @@ namespace crow
                 return *this;
             }
 
-            wvalue& operator=(double value)
+            wvalue& operator=(float value)
             {
                 reset();
                 t_ = type::Number;
                 num.d = value;
                 nt = num_type::Floating_point;
+                return *this;
+            }
+
+            wvalue& operator=(double value)
+            {
+                reset();
+                t_ = type::Number;
+                num.d = value;
+                nt = num_type::Double_precision_floating_point;
                 return *this;
             }
 
@@ -6867,7 +6946,7 @@ namespace crow
                 }
                 else
                 {
-#if defined(__APPLE__) || defined(__MACH__) || defined(__FreeBSD__) || defined(__ANDROID__)
+#if defined(__APPLE__) || defined(__MACH__) || defined(__FreeBSD__) || defined(__ANDROID__) || defined(_LIBCPP_VERSION)
                     o = std::unique_ptr<object>(new object(initializer_list));
 #else
                     (*o) = initializer_list;
@@ -6886,7 +6965,7 @@ namespace crow
                 }
                 else
                 {
-#if defined(__APPLE__) || defined(__MACH__) || defined(__FreeBSD__) || defined(__ANDROID__)
+#if defined(__APPLE__) || defined(__MACH__) || defined(__FreeBSD__) || defined(__ANDROID__) || defined(_LIBCPP_VERSION)
                     o = std::unique_ptr<object>(new object(value));
 #else
                     (*o) = value;
@@ -7037,7 +7116,14 @@ namespace crow
                 out.push_back('"');
             }
 
-            inline void dump_internal(const wvalue& v, std::string& out) const
+            inline void dump_indentation_part(std::string& out, const int indent, const char separator, const int indent_level) const
+            {
+                out.push_back('\n');
+                out.append(indent_level * indent, separator);
+            }
+
+
+            inline void dump_internal(const wvalue& v, std::string& out, const int indent, const char separator, const int indent_level = 0) const
             {
                 switch (v.t_)
                 {
@@ -7046,7 +7132,7 @@ namespace crow
                     case type::True: out += "true"; break;
                     case type::Number:
                     {
-                        if (v.nt == num_type::Floating_point)
+                        if (v.nt == num_type::Floating_point || v.nt == num_type::Double_precision_floating_point)
                         {
                             if (isnan(v.num.d) || isinf(v.num.d))
                             {
@@ -7061,11 +7147,22 @@ namespace crow
                                 zero
                             } f_state;
                             char outbuf[128];
+                            if (v.nt == num_type::Double_precision_floating_point)
+                            {
 #ifdef _MSC_VER
-                            sprintf_s(outbuf, sizeof(outbuf), "%f", v.num.d);
+                                sprintf_s(outbuf, sizeof(outbuf), "%.*g", DECIMAL_DIG, v.num.d);
 #else
-                            snprintf(outbuf, sizeof(outbuf), "%f", v.num.d);
+                                snprintf(outbuf, sizeof(outbuf), "%.*g", DECIMAL_DIG, v.num.d);
 #endif
+                            }
+                            else
+                            {
+#ifdef _MSC_VER
+                                sprintf_s(outbuf, sizeof(outbuf), "%f", v.num.d);
+#else
+                                snprintf(outbuf, sizeof(outbuf), "%f", v.num.d);
+#endif 
+                            }
                             char *p = &outbuf[0], *o = nullptr; // o is the position of the first trailing 0
                             f_state = start;
                             while (*p != '\0')
@@ -7120,6 +7217,12 @@ namespace crow
                     case type::List:
                     {
                         out.push_back('[');
+
+                        if (indent >= 0)
+                        {
+                            dump_indentation_part(out, indent, separator, indent_level + 1);
+                        }
+
                         if (v.l)
                         {
                             bool first = true;
@@ -7128,17 +7231,34 @@ namespace crow
                                 if (!first)
                                 {
                                     out.push_back(',');
+
+                                    if (indent >= 0)
+                                    {
+                                        dump_indentation_part(out, indent, separator, indent_level + 1);
+                                    }
                                 }
                                 first = false;
-                                dump_internal(x, out);
+                                dump_internal(x, out, indent, separator, indent_level + 1);
                             }
                         }
+
+                        if (indent >= 0)
+                        {
+                            dump_indentation_part(out, indent, separator, indent_level);
+                        }
+
                         out.push_back(']');
                     }
                     break;
                     case type::Object:
                     {
                         out.push_back('{');
+
+                        if (indent >= 0)
+                        {
+                            dump_indentation_part(out, indent, separator, indent_level + 1);
+                        }
+
                         if (v.o)
                         {
                             bool first = true;
@@ -7147,13 +7267,29 @@ namespace crow
                                 if (!first)
                                 {
                                     out.push_back(',');
+                                    if (indent >= 0)
+                                    {
+                                        dump_indentation_part(out, indent, separator, indent_level + 1);
+                                    }
                                 }
                                 first = false;
                                 dump_string(kv.first, out);
                                 out.push_back(':');
-                                dump_internal(kv.second, out);
+
+                                if (indent >= 0)
+                                {
+                                    out.push_back(' ');
+                                }
+
+                                dump_internal(kv.second, out, indent, separator, indent_level + 1);
                             }
                         }
+
+                        if (indent >= 0)
+                        {
+                            dump_indentation_part(out, indent, separator, indent_level);
+                        }
+
                         out.push_back('}');
                     }
                     break;
@@ -7165,12 +7301,19 @@ namespace crow
             }
 
         public:
-            std::string dump() const
+            std::string dump(const int indent, const char separator = ' ') const
             {
                 std::string ret;
                 ret.reserve(estimate_length());
-                dump_internal(*this, ret);
+                dump_internal(*this, ret, indent, separator);
                 return ret;
+            }
+
+            std::string dump() const
+            {
+                static constexpr int DontIndent = -1;
+
+                return dump(DontIndent);
             }
         };
 
@@ -7179,14 +7322,16 @@ namespace crow
         {
             int64_t get(int64_t fallback)
             {
-                if (ref.t() != type::Number || ref.nt == num_type::Floating_point)
+                if (ref.t() != type::Number || ref.nt == num_type::Floating_point || 
+                    ref.nt == num_type::Double_precision_floating_point)
                     return fallback;
                 return ref.num.si;
             }
 
             double get(double fallback)
             {
-                if (ref.t() != type::Number || ref.nt != num_type::Floating_point)
+                if (ref.t() != type::Number || ref.nt != num_type::Floating_point ||
+                    ref.nt == num_type::Double_precision_floating_point)
                     return fallback;
                 return ref.num.d;
             }
@@ -7456,6 +7601,8 @@ namespace crow
                 if (complete_request_handler_)
                 {
                     complete_request_handler_();
+                    manual_length_header = false;
+                    skip_body = false;
                 }
             }
         }
@@ -7960,7 +8107,7 @@ namespace crow
             {
                 case type::Number:
                 {
-                    if (rv.nt() == num_type::Floating_point)
+                    if (rv.nt() == num_type::Floating_point || rv.nt() == num_type::Double_precision_floating_point)
                         return multi_value{rv.d()};
                     else if (rv.nt() == num_type::Unsigned_integer)
                         return multi_value{int64_t(rv.u())};
@@ -8465,7 +8612,7 @@ namespace crow
 #include <iostream>
 #include <utility>
 
-namespace crow
+namespace crow // NOTE: Already documented in "crow/app.h"
 {
 
     /// Local middleware should extend ILocalMiddleware
@@ -8844,11 +8991,16 @@ namespace crow
 } // namespace crow
 
 
+#ifdef CROW_USE_BOOST
+#include <boost/asio.hpp>
+#include <boost/asio/basic_waitable_timer.hpp>
+#else
 #ifndef ASIO_STANDALONE
 #define ASIO_STANDALONE
 #endif
 #include <asio.hpp>
 #include <asio/basic_waitable_timer.hpp>
+#endif
 
 #include <chrono>
 #include <functional>
@@ -8858,6 +9010,12 @@ namespace crow
 
 namespace crow
 {
+#ifdef CROW_USE_BOOST
+    namespace asio = boost::asio;
+    using error_code = boost::system::error_code;
+#else
+    using error_code = asio::error_code;
+#endif
     namespace detail
     {
 
@@ -8955,7 +9113,7 @@ namespace crow
                 if (tasks_.empty()) highest_id_ = 0;
             }
 
-            void tick_handler(const asio::error_code& ec)
+            void tick_handler(const error_code& ec)
             {
                 if (ec) return;
 
@@ -8979,21 +9137,32 @@ namespace crow
     } // namespace detail
 } // namespace crow
 
+
+#ifdef CROW_USE_BOOST
+#include <boost/asio.hpp>
+#else
 #ifndef ASIO_STANDALONE
 #define ASIO_STANDALONE
 #endif
 #include <asio.hpp>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <vector>
 #include <memory>
+#include <vector>
 
 
 namespace crow
 {
+#ifdef CROW_USE_BOOST
+    namespace asio = boost::asio;
+    using error_code = boost::system::error_code;
+#else
+    using error_code = asio::error_code;
+#endif
     using tcp = asio::ip::tcp;
-
 
 #ifdef CROW_ENABLE_DEBUG
     static std::atomic<int> connectionCount;
@@ -9049,7 +9218,7 @@ namespace crow
         void start()
         {
             auto self = this->shared_from_this();
-            adaptor_.start([self](const asio::error_code& ec) {
+            adaptor_.start([self](const error_code& ec) {
                 if (!ec)
                 {
                     self->start_deadline();
@@ -9071,6 +9240,7 @@ namespace crow
             if (!routing_handle_result_->rule_index)
             {
                 parser_.done();
+                need_to_call_after_handlers_ = true;
                 complete_request();
             }
         }
@@ -9095,6 +9265,12 @@ namespace crow
             bool is_invalid_request = false;
             add_keep_alive_ = false;
 
+            // Create context
+            ctx_ = detail::context<Middlewares...>();
+            req_.middleware_context = static_cast<void*>(&ctx_);
+            req_.middleware_container = static_cast<void*>(middlewares_);
+            req_.io_service = &adaptor_.get_io_service();
+            
             req_.remote_ip_address = adaptor_.remote_endpoint().address().to_string();
 
             add_keep_alive_ = req_.keep_alive;
@@ -9117,6 +9293,9 @@ namespace crow
                     }
                     else
                     {
+                
+                        detail::middleware_call_helper<detail::middleware_call_criteria_only_global,
+                                                       0, decltype(ctx_), decltype(*middlewares_)>({}, *middlewares_, req_, res, ctx_);
                         close_connection_ = true;
                         handler_->handle_upgrade(req_, res, std::move(adaptor_));
                         return;
@@ -9135,12 +9314,7 @@ namespace crow
                 res.is_alive_helper_ = [self]() -> bool {
                     return self->adaptor_.is_open();
                 };
-
-                ctx_ = detail::context<Middlewares...>();
-                req_.middleware_context = static_cast<void*>(&ctx_);
-                req_.middleware_container = static_cast<void*>(middlewares_);
-                req_.io_service = &adaptor_.get_io_service();
-
+                
                 detail::middleware_call_helper<detail::middleware_call_criteria_only_global,
                                                0, decltype(ctx_), decltype(*middlewares_)>({}, *middlewares_, req_, res, ctx_);
 
@@ -9275,6 +9449,7 @@ namespace crow
               {status::FORBIDDEN, "HTTP/1.1 403 Forbidden\r\n"},
               {status::NOT_FOUND, "HTTP/1.1 404 Not Found\r\n"},
               {status::METHOD_NOT_ALLOWED, "HTTP/1.1 405 Method Not Allowed\r\n"},
+              {status::NOT_ACCEPTABLE, "HTTP/1.1 406 Not Acceptable\r\n"},
               {status::PROXY_AUTHENTICATION_REQUIRED, "HTTP/1.1 407 Proxy Authentication Required\r\n"},
               {status::CONFLICT, "HTTP/1.1 409 Conflict\r\n"},
               {status::GONE, "HTTP/1.1 410 Gone\r\n"},
@@ -9436,7 +9611,7 @@ namespace crow
             auto self = this->shared_from_this();
             adaptor_.socket().async_read_some(
               asio::buffer(buffer_),
-              [self](const asio::error_code& ec, std::size_t bytes_transferred) {
+              [self](const error_code& ec, std::size_t bytes_transferred) {
                   bool error_while_reading = true;
                   if (!ec)
                   {
@@ -9479,7 +9654,7 @@ namespace crow
             auto self = this->shared_from_this();
             asio::async_write(
               adaptor_.socket(), buffers_,
-              [self](const asio::error_code& ec, std::size_t /*bytes_transferred*/) {
+              [self](const error_code& ec, std::size_t /*bytes_transferred*/) {
                   self->res.clear();
                   self->res_body_copy_.clear();                  
                   if (!self->continue_requested)
@@ -9510,7 +9685,7 @@ namespace crow
         inline void do_write_sync(std::vector<asio::const_buffer>& buffers)
         {
 
-            asio::write(adaptor_.socket(), buffers, [&](asio::error_code ec, std::size_t) {
+            asio::write(adaptor_.socket(), buffers, [&](error_code ec, std::size_t) {
                 if (!ec)
                 {
                     return false;
@@ -9588,8 +9763,22 @@ namespace crow
 
 #include <array>
 
-namespace crow
+namespace crow // NOTE: Already documented in "crow/app.h"
 {
+#ifdef CROW_USE_BOOST
+    namespace asio = boost::asio;
+    using error_code = boost::system::error_code;
+#else
+    using error_code = asio::error_code;
+#endif
+
+    /**
+     * \namespace crow::websocket
+     * \brief Namespace that includes the \ref Connection class
+     * and \ref connection struct. Useful for WebSockets connection.
+     *
+     * Used specially in crow/websocket.h, crow/app.h and crow/routing.h
+     */
     namespace websocket
     {
         enum class WebSocketReadState
@@ -9881,7 +10070,7 @@ namespace crow
                         //asio::async_read(adaptor_.socket(), asio::buffer(&mini_header_, 1),
                         adaptor_.socket().async_read_some(
                           asio::buffer(&mini_header_, 2),
-                          [this](const asio::error_code& ec, std::size_t
+                          [this](const error_code& ec, std::size_t
 #ifdef CROW_ENABLE_DEBUG
                                                                bytes_transferred
 #endif
@@ -9949,7 +10138,7 @@ namespace crow
                         remaining_length16_ = 0;
                         asio::async_read(
                           adaptor_.socket(), asio::buffer(&remaining_length16_, 2),
-                          [this](const asio::error_code& ec, std::size_t
+                          [this](const error_code& ec, std::size_t
 #ifdef CROW_ENABLE_DEBUG
                                                                bytes_transferred
 #endif
@@ -9985,7 +10174,7 @@ namespace crow
                     {
                         asio::async_read(
                           adaptor_.socket(), asio::buffer(&remaining_length_, 8),
-                          [this](const asio::error_code& ec, std::size_t
+                          [this](const error_code& ec, std::size_t
 #ifdef CROW_ENABLE_DEBUG
                                                                bytes_transferred
 #endif
@@ -10029,7 +10218,7 @@ namespace crow
                         {
                             asio::async_read(
                               adaptor_.socket(), asio::buffer((char*)&mask_, 4),
-                              [this](const asio::error_code& ec, std::size_t
+                              [this](const error_code& ec, std::size_t
 #ifdef CROW_ENABLE_DEBUG
                                                                    bytes_transferred
 #endif
@@ -10071,7 +10260,7 @@ namespace crow
                             to_read = remaining_length_;
                         adaptor_.socket().async_read_some(
                           asio::buffer(buffer_, static_cast<std::size_t>(to_read)),
-                          [this](const asio::error_code& ec, std::size_t bytes_transferred) {
+                          [this](const error_code& ec, std::size_t bytes_transferred) {
                               is_reading = false;
 
                               if (!ec)
@@ -10223,7 +10412,7 @@ namespace crow
                     auto watch = std::weak_ptr<void>{anchor_};
                     asio::async_write(
                       adaptor_.socket(), buffers,
-                      [&, watch](const asio::error_code& ec, std::size_t /*bytes_transferred*/) {
+                      [&, watch](const error_code& ec, std::size_t /*bytes_transferred*/) {
                           if (!ec && !close_connection_)
                           {
                               sending_buffers_.clear();
@@ -10328,11 +10517,16 @@ namespace crow
 
 namespace crow
 {
-    constexpr const char VERSION[] = "1.1.0";
+    constexpr const char VERSION[] = "master";
 }
 
 
-#include <chrono>
+#ifdef CROW_USE_BOOST
+#include <boost/asio.hpp>
+#ifdef CROW_ENABLE_SSL
+#include <boost/asio/ssl.hpp>
+#endif
+#else
 #ifndef ASIO_STANDALONE
 #define ASIO_STANDALONE
 #endif
@@ -10340,15 +10534,25 @@ namespace crow
 #ifdef CROW_ENABLE_SSL
 #include <asio/ssl.hpp>
 #endif
-#include <cstdint>
+#endif
+
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <future>
-#include <vector>
 #include <memory>
+#include <vector>
 
 
-namespace crow
+
+namespace crow // NOTE: Already documented in "crow/app.h"
 {
+#ifdef CROW_USE_BOOST
+    namespace asio = boost::asio;
+    using error_code = boost::system::error_code;
+#else
+    using error_code = asio::error_code;
+#endif
     using tcp = asio::ip::tcp;
 
     template<typename Handler, typename Adaptor = SocketAdaptor, typename... Middlewares>
@@ -10380,7 +10584,7 @@ namespace crow
         {
             tick_function_();
             tick_timer_.expires_after(std::chrono::milliseconds(tick_interval_.count()));
-            tick_timer_.async_wait([this](const asio::error_code& ec) {
+            tick_timer_.async_wait([this](const error_code& ec) {
                 if (ec)
                     return;
                 on_tick();
@@ -10456,7 +10660,7 @@ namespace crow
             {
                 tick_timer_.expires_after(std::chrono::milliseconds(tick_interval_.count()));
                 tick_timer_.async_wait(
-                  [this](const asio::error_code& ec) {
+                  [this](const error_code& ec) {
                       if (ec)
                           return;
                       on_tick();
@@ -10471,7 +10675,7 @@ namespace crow
             CROW_LOG_INFO << "Call `app.loglevel(crow::LogLevel::Warning)` to hide Info level logs.";
 
             signals_.async_wait(
-              [&](const asio::error_code& /*error*/, int /*signal_number*/) {
+              [&](const error_code& /*error*/, int /*signal_number*/) {
                   stop();
               });
 
@@ -10555,7 +10759,7 @@ namespace crow
 
                 acceptor_.async_accept(
                   p->socket(),
-                  [this, p, &is, service_idx](asio::error_code ec) {
+                  [this, p, &is, service_idx](error_code ec) {
                       if (!ec)
                       {
                           is.post(
@@ -11340,7 +11544,7 @@ namespace crow
 #include <type_traits>
 
 
-namespace crow
+namespace crow // NOTE: Already documented in "crow/app.h"
 {
 
     constexpr const uint16_t INVALID_BP_ID{((uint16_t)-1)};
@@ -11418,6 +11622,15 @@ namespace crow
         {}
 
         virtual void validate() = 0;
+        
+        void set_added() {
+            added_ = true;
+        }
+
+        bool is_added() {
+            return added_;
+        }
+
         std::unique_ptr<BaseRule> upgrade()
         {
             if (rule_to_upgrade_)
@@ -11463,6 +11676,7 @@ namespace crow
 
         std::string rule_;
         std::string name_;
+        bool added_{false};
 
         std::unique_ptr<BaseRule> rule_to_upgrade_;
 
@@ -12476,11 +12690,18 @@ namespace crow
             return static_dir_;
         }
 
-        DynamicRule& new_rule_dynamic(std::string&& rule)
+        void set_added() {
+            added_ = true;
+        }
+
+        bool is_added() {
+            return added_;
+        }
+
+        DynamicRule& new_rule_dynamic(const std::string& rule)
         {
-            std::string new_rule = std::move(rule);
-            new_rule = '/' + prefix_ + new_rule;
-            auto ruleObject = new DynamicRule(new_rule);
+            std::string new_rule = '/' + prefix_ + rule;
+            auto ruleObject = new DynamicRule(std::move(new_rule));
             ruleObject->custom_templates_base = templates_dir_;
             all_rules_.emplace_back(ruleObject);
 
@@ -12488,13 +12709,12 @@ namespace crow
         }
 
         template<uint64_t N>
-        typename black_magic::arguments<N>::type::template rebind<TaggedRule>& new_rule_tagged(std::string&& rule)
+        typename black_magic::arguments<N>::type::template rebind<TaggedRule>& new_rule_tagged(const std::string& rule)
         {
-            std::string new_rule = std::move(rule);
-            new_rule = '/' + prefix_ + new_rule;
+            std::string new_rule = '/' + prefix_ + rule;
             using RuleT = typename black_magic::arguments<N>::type::template rebind<TaggedRule>;
 
-            auto ruleObject = new RuleT(new_rule);
+            auto ruleObject = new RuleT(std::move(new_rule));
             ruleObject->custom_templates_base = templates_dir_;
             all_rules_.emplace_back(ruleObject);
 
@@ -12550,6 +12770,7 @@ namespace crow
         CatchallRule catchall_rule_;
         std::vector<Blueprint*> blueprints_;
         detail::middleware_indices mw_indices_;
+        bool added_{false};
 
         friend class Router;
     };
@@ -12585,6 +12806,11 @@ namespace crow
             return catchall_rule_;
         }
 
+        void internal_add_rule_object(const std::string& rule, BaseRule* ruleObject)
+        {
+            internal_add_rule_object(rule, ruleObject, INVALID_BP_ID, blueprints_);
+        }
+
         void internal_add_rule_object(const std::string& rule, BaseRule* ruleObject, const uint16_t& BP_index, std::vector<Blueprint*>& blueprints)
         {
             bool has_trailing_slash = false;
@@ -12609,6 +12835,8 @@ namespace crow
                     per_methods_[method].trie.add(rule_without_trailing_slash, RULE_SPECIAL_REDIRECT_SLASH, BP_index != INVALID_BP_ID ? blueprints[BP_index]->prefix().length() : 0, BP_index);
                 }
             });
+
+            ruleObject->set_added();
         }
 
         void register_blueprint(Blueprint& blueprint)
@@ -12643,11 +12871,20 @@ namespace crow
             }
         }
 
+        void validate_bp() {
+            //Take all the routes from the registered blueprints and add them to `all_rules_` to be processed.
+            detail::middleware_indices blueprint_mw;
+            validate_bp(blueprints_, blueprint_mw);
+        }
+
         void validate_bp(std::vector<Blueprint*> blueprints, detail::middleware_indices& current_mw)
         {
             for (unsigned i = 0; i < blueprints.size(); i++)
             {
                 Blueprint* blueprint = blueprints[i];
+
+                if (blueprint->is_added()) continue;
+
                 if (blueprint->static_dir_ == "" && blueprint->all_rules_.empty())
                 {
                     std::vector<HTTPMethod> methods;
@@ -12662,7 +12899,7 @@ namespace crow
                 current_mw.merge_back(blueprint->mw_indices_);
                 for (auto& rule : blueprint->all_rules_)
                 {
-                    if (rule)
+                    if (rule && !rule->is_added())
                     {
                         auto upgraded = rule->upgrade();
                         if (upgraded)
@@ -12674,24 +12911,21 @@ namespace crow
                 }
                 validate_bp(blueprint->blueprints_, current_mw);
                 current_mw.pop_back(blueprint->mw_indices_);
+                blueprint->set_added();
             }
         }
 
         void validate()
         {
-            //Take all the routes from the registered blueprints and add them to `all_rules_` to be processed.
-            detail::middleware_indices blueprint_mw;
-            validate_bp(blueprints_, blueprint_mw);
-
             for (auto& rule : all_rules_)
             {
-                if (rule)
+                if (rule && !rule->is_added())
                 {
                     auto upgraded = rule->upgrade();
                     if (upgraded)
                         rule = std::move(upgraded);
                     rule->validate();
-                    internal_add_rule_object(rule->rule(), rule.get(), INVALID_BP_ID, blueprints_);
+                    internal_add_rule_object(rule->rule(), rule.get());
                 }
             }
             for (auto& per_method : per_methods_)
@@ -12753,22 +12987,13 @@ namespace crow
 
             CROW_LOG_DEBUG << "Matched rule (upgrade) '" << rules[rule_index]->rule_ << "' " << static_cast<uint32_t>(req.method) << " / " << rules[rule_index]->get_methods();
 
-            // any uncaught exceptions become 500s
             try
             {
                 rules[rule_index]->handle_upgrade(req, res, std::move(adaptor));
             }
-            catch (std::exception& e)
-            {
-                CROW_LOG_ERROR << "An uncaught exception occurred: " << e.what();
-                res = response(500);
-                res.end();
-                return;
-            }
             catch (...)
             {
-                CROW_LOG_ERROR << "An uncaught exception occurred. The type was unknown so no information was available.";
-                res = response(500);
+                exception_handler_(res);
                 res.end();
                 return;
             }
@@ -12826,7 +13051,14 @@ namespace crow
                 std::vector<uint16_t> bpi = found.blueprint_indices;
                 if (bps_found[i]->catchall_rule().has_handler())
                 {
-                    bps_found[i]->catchall_rule().handler_(req, res);
+                    try
+                    {
+                        bps_found[i]->catchall_rule().handler_(req, res);
+                    }
+                    catch (...)
+                    {
+                        exception_handler_(res);
+                    }
 #ifdef CROW_ENABLE_DEBUG
                     return std::string("Redirected to Blueprint \"" + bps_found[i]->prefix() + "\" Catchall rule");
 #else
@@ -12836,7 +13068,14 @@ namespace crow
             }
             if (catchall_rule_.has_handler())
             {
-                catchall_rule_.handler_(req, res);
+                try
+                {
+                    catchall_rule_.handler_(req, res);
+                }
+                catch (...)
+                {
+                    exception_handler_(res);
+                }
 #ifdef CROW_ENABLE_DEBUG
                 return std::string("Redirected to global Catchall rule");
 #else
@@ -12996,23 +13235,14 @@ namespace crow
 
             CROW_LOG_DEBUG << "Matched rule '" << rules[rule_index]->rule_ << "' " << static_cast<uint32_t>(req.method) << " / " << rules[rule_index]->get_methods();
 
-            // any uncaught exceptions become 500s
             try
             {
                 auto& rule = rules[rule_index];
                 handle_rule<App>(rule, req, res, found.r_params);
             }
-            catch (std::exception& e)
-            {
-                CROW_LOG_ERROR << "An uncaught exception occurred: " << e.what();
-                res = response(500);
-                res.end();
-                return;
-            }
             catch (...)
             {
-                CROW_LOG_ERROR << "An uncaught exception occurred. The type was unknown so no information was available.";
-                res = response(500);
+                exception_handler_(res);
                 res.end();
                 return;
             }
@@ -13079,6 +13309,30 @@ namespace crow
             return blueprints_;
         }
 
+        std::function<void(crow::response&)>& exception_handler()
+        {
+            return exception_handler_;
+        }
+
+        static void default_exception_handler(response& res)
+        {
+            // any uncaught exceptions become 500s
+            res = response(500);
+
+            try
+            {
+                throw;
+            }
+            catch (const std::exception& e)
+            {
+                CROW_LOG_ERROR << "An uncaught exception occurred: " << e.what();
+            }
+            catch (...)
+            {
+                CROW_LOG_ERROR << "An uncaught exception occurred. The type was unknown so no information was available.";
+            }
+        }
+
     private:
         CatchallRule catchall_rule_;
 
@@ -13094,6 +13348,7 @@ namespace crow
         std::array<PerMethod, static_cast<int>(HTTPMethod::InternalMethodCount)> per_methods_;
         std::vector<std::unique_ptr<BaseRule>> all_rules_;
         std::vector<Blueprint*> blueprints_;
+        std::function<void(crow::response&)> exception_handler_ = &default_exception_handler;
     };
 } // namespace crow
 
@@ -13294,6 +13549,23 @@ namespace crow
 
 } // namespace crow
 
+/**
+ * \file crow/app.h
+ * \brief This file includes the definition of the crow::Crow class,
+ * the crow::App and crow::SimpleApp aliases, and some macros.
+ *
+ * In this file are defined:
+ * - crow::Crow
+ * - crow::App
+ * - crow::SimpleApp
+ * - \ref CROW_ROUTE
+ * - \ref CROW_BP_ROUTE
+ * - \ref CROW_WEBSOCKET_ROUTE
+ * - \ref CROW_MIDDLEWARES
+ * - \ref CROW_CATCHALL_ROUTE
+ * - \ref CROW_BP_CATCHALL_ROUTE
+ */
+
 
 #include <chrono>
 #include <string>
@@ -13306,52 +13578,185 @@ namespace crow
 #include <condition_variable>
 
 #ifdef CROW_ENABLE_COMPRESSION
-#endif
+#endif // #ifdef CROW_ENABLE_COMPRESSION
+
 
 #ifdef CROW_MSVC_WORKAROUND
-#define CROW_ROUTE(app, url) app.route_dynamic(url)
-#define CROW_BP_ROUTE(blueprint, url) blueprint.new_rule_dynamic(url)
-#else
+
+#define CROW_ROUTE(app, url) app.route_dynamic(url) // See the documentation in the comment below.
+#define CROW_BP_ROUTE(blueprint, url) blueprint.new_rule_dynamic(url) // See the documentation in the comment below.
+
+#else // #ifdef CROW_MSVC_WORKAROUND
+
+/**
+ * \def CROW_ROUTE(app, url)
+ * \brief Creates a route for app using a rule.
+ *
+ * It use crow::Crow::route_dynamic or crow::Crow::route to define
+ * a rule for your application. It's usage is like this:
+ *
+ * ```cpp
+ * auto app = crow::SimpleApp(); // or crow::App()
+ * CROW_ROUTE(app, "/")
+ * ([](){
+ *     return "<h1>Hello, world!</h1>";
+ * });
+ * ```
+ *
+ * This is the recommended way to define routes in a crow application.
+ * \see [Page of guide "Routes"](https://crowcpp.org/master/guides/routes/).
+ */
 #define CROW_ROUTE(app, url) app.template route<crow::black_magic::get_parameter_tag(url)>(url)
+
+/**
+ * \def CROW_BP_ROUTE(blueprint, url)
+ * \brief Creates a route for a blueprint using a rule.
+ *
+ * It may use crow::Blueprint::new_rule_dynamic or
+ * crow::Blueprint::new_rule_tagged to define a new rule for
+ * an given blueprint. It's usage is similar
+ * to CROW_ROUTE macro:
+ *
+ * ```cpp
+ * crow::Blueprint my_bp();
+ * CROW_BP_ROUTE(my_bp, "/")
+ * ([](){
+ *     return "<h1>Hello, world!</h1>";
+ * });
+ * ```
+ *
+ * This is the recommended way to define routes in a crow blueprint
+ * because of its compile-time capabilities.
+ *
+ * \see [Page of the guide "Blueprints"](https://crowcpp.org/master/guides/blueprints/).
+ */
 #define CROW_BP_ROUTE(blueprint, url) blueprint.new_rule_tagged<crow::black_magic::get_parameter_tag(url)>(url)
+
+/**
+ * \def CROW_WEBSOCKET_ROUTE(app, url)
+ * \brief Defines WebSocket route for app.
+ *
+ * It binds a WebSocket route to app. Easy solution to implement
+ * WebSockets in your app. The usage syntax of this macro is
+ * like this:
+ *
+ * ```cpp
+ * auto app = crow::SimpleApp(); // or crow::App()
+ * CROW_WEBSOCKET_ROUTE(app, "/ws")
+ *     .onopen([&](crow::websocket::connection& conn){
+ *                do_something();
+ *            })
+ *     .onclose([&](crow::websocket::connection& conn, const std::string& reason){
+ *                 do_something();
+ *             })
+ *     .onmessage([&](crow::websocket::connection&, const std::string& data, bool is_binary){
+ *                   if (is_binary)
+ *                       do_something(data);
+ *                   else
+ *                       do_something_else(data);
+ *               });
+ * ```
+ *
+ * \see [Page of the guide "WebSockets"](https://crowcpp.org/master/guides/websockets/).
+ */
 #define CROW_WEBSOCKET_ROUTE(app, url) app.route<crow::black_magic::get_parameter_tag(url)>(url).websocket<std::remove_reference<decltype(app)>::type>(&app)
+
+/**
+ * \def CROW_MIDDLEWARES(app, ...)
+ * \brief Enable a Middleware for an specific route in app
+ * or blueprint.
+ *
+ * It defines the usage of a Middleware in one route. And it
+ * can be used in both crow::SimpleApp (and crow::App) instances and
+ * crow::Blueprint. Its usage syntax is like this:
+ *
+ * ```cpp
+ * auto app = crow::SimpleApp(); // or crow::App()
+ * CROW_ROUTE(app, "/with_middleware")
+ * .CROW_MIDDLEWARES(app, LocalMiddleware) // Can be used more than one
+ * ([]() {                                 // middleware.
+ *     return "Hello world!";
+ * });
+ * ```
+ *
+ * \see [Page of the guide "Middlewares"](https://crowcpp.org/master/guides/middleware/).
+ */
 #define CROW_MIDDLEWARES(app, ...) template middlewares<typename std::remove_reference<decltype(app)>::type, __VA_ARGS__>()
-#endif
+
+#endif // #ifdef CROW_MSVC_WORKAROUND
+
+/**
+ * \def CROW_CATCHALL_ROUTE(app)
+ * \brief Defines a custom catchall route for app using a
+ * custom rule.
+ *
+ * It defines a handler when the client make a request for an
+ * undefined route. Instead of just reply with a `404` status
+ * code (default behavior), you can define a custom handler
+ * using this macro.
+ *
+ * \see [Page of the guide "Routes" (Catchall routes)](https://crowcpp.org/master/guides/routes/#catchall-routes).
+ */ 
 #define CROW_CATCHALL_ROUTE(app) app.catchall_route()
+
+/**
+ * \def CROW_BP_CATCHALL_ROUTE(blueprint)
+ * \brief Defines a custom catchall route for blueprint
+ * using a custom rule.
+ *
+ * It defines a handler when the client make a request for an
+ * undefined route in the blueprint.
+ *
+ * \see [Page of the guide "Blueprint" (Define a custom Catchall route)](https://crowcpp.org/master/guides/blueprints/#define-a-custom-catchall-route).
+ */ 
 #define CROW_BP_CATCHALL_ROUTE(blueprint) blueprint.catchall_rule()
 
+
+/**
+ * \namespace crow
+ * \brief The main namespace of the library. In this namespace
+ * is defined the most important classes and functions of the
+ * library.
+ * 
+ * Within this namespace, the Crow class, Router class, Connection
+ * class, and other are defined.
+ */
 namespace crow
 {
 #ifdef CROW_ENABLE_SSL
     using ssl_context_t = asio::ssl::context;
 #endif
-    /// The main server application
-
-    ///
-    /// Use `SimpleApp` or `App<Middleware1, Middleware2, etc...>`
+    /**
+     * \class Crow
+     * \brief The main server application class.
+     *
+     * Use crow::SimpleApp or crow::App<Middleware1, Middleware2, etc...> instead of
+     * directly instantiate this class.
+     */
     template<typename... Middlewares>
     class Crow
     {
     public:
-        /// This crow application
+        /// \brief This is the crow application
         using self_t = Crow;
-        /// The HTTP server
+
+        /// \brief The HTTP server
         using server_t = Server<Crow, SocketAdaptor, Middlewares...>;
+
 #ifdef CROW_ENABLE_SSL
-        /// An HTTP server that runs on SSL with an SSLAdaptor
+        /// \brief An HTTP server that runs on SSL with an SSLAdaptor
         using ssl_server_t = Server<Crow, SSLAdaptor, Middlewares...>;
 #endif
         Crow()
         {}
 
-        /// Construct Crow with a subset of middleware
+        /// \brief Construct Crow with a subset of middleware
         template<typename... Ts>
         Crow(Ts&&... ts):
           middlewares_(make_middleware_tuple(std::forward<Ts>(ts)...))
         {}
 
-        /// Process an Upgrade request
-
+        /// \brief Process an Upgrade request
         ///
         /// Currently used to upgrade an HTTP connection to a WebSocket connection
         template<typename Adaptor>
@@ -13360,19 +13765,19 @@ namespace crow
             router_.handle_upgrade(req, res, adaptor);
         }
 
-        /// Process only the method and URL of a request and provide a route (or an error response)
+        /// \brief Process only the method and URL of a request and provide a route (or an error response)
         std::unique_ptr<routing_handle_result> handle_initial(request& req, response& res)
         {
             return router_.handle_initial(req, res);
         }
 
-        /// Process the fully parsed request and generate a response for it
+        /// \brief Process the fully parsed request and generate a response for it
         void handle(request& req, response& res, std::unique_ptr<routing_handle_result>& found)
         {
             router_.handle<self_t>(req, res, *found);
         }
 
-        /// Process a fully parsed request from start to finish (primarily used for debugging)
+        /// \brief Process a fully parsed request from start to finish (primarily used for debugging)
         void handle_full(request& req, response& res)
         {
             auto found = handle_initial(req, res);
@@ -13380,42 +13785,42 @@ namespace crow
                 handle(req, res, found);
         }
 
-        /// Create a dynamic route using a rule (**Use CROW_ROUTE instead**)
-        DynamicRule& route_dynamic(std::string&& rule)
+        /// \brief Create a dynamic route using a rule (**Use CROW_ROUTE instead**)
+        DynamicRule& route_dynamic(const std::string& rule)
         {
-            return router_.new_rule_dynamic(std::move(rule));
+            return router_.new_rule_dynamic(rule);
         }
 
-        ///Create a route using a rule (**Use CROW_ROUTE instead**)
+        /// \brief Create a route using a rule (**Use CROW_ROUTE instead**)
         template<uint64_t Tag>
 #ifdef CROW_GCC83_WORKAROUND
-        auto& route(std::string&& rule)
+        auto& route(const std::string& rule)
 #else
-        auto route(std::string&& rule)
+        auto route(const std::string& rule)
 #endif
 #if defined CROW_CAN_USE_CPP17 && !defined CROW_GCC83_WORKAROUND
-          -> typename std::invoke_result<decltype(&Router::new_rule_tagged<Tag>), Router, std::string&&>::type
+          -> typename std::invoke_result<decltype(&Router::new_rule_tagged<Tag>), Router, const std::string&>::type
 #elif !defined CROW_GCC83_WORKAROUND
-          -> typename std::result_of<decltype (&Router::new_rule_tagged<Tag>)(Router, std::string&&)>::type
+          -> typename std::result_of<decltype (&Router::new_rule_tagged<Tag>)(Router, const std::string&)>::type
 #endif
         {
-            return router_.new_rule_tagged<Tag>(std::move(rule));
+            return router_.new_rule_tagged<Tag>(rule);
         }
 
-        /// Create a route for any requests without a proper route (**Use CROW_CATCHALL_ROUTE instead**)
+        /// \brief Create a route for any requests without a proper route (**Use CROW_CATCHALL_ROUTE instead**)
         CatchallRule& catchall_route()
         {
             return router_.catchall_rule();
         }
 
-        /// Set the default max payload size for websockets
+        /// \brief Set the default max payload size for websockets
         self_t& websocket_max_payload(uint64_t max_payload)
         {
             max_payload_ = max_payload;
             return *this;
         }
 
-        /// Get the default max payload size for websockets
+        /// \brief Get the default max payload size for websockets
         uint64_t websocket_max_payload()
         {
             return max_payload_;
@@ -13438,53 +13843,53 @@ namespace crow
             return signals_;
         }
 
-        /// Set the port that Crow will handle requests on
+        /// \brief Set the port that Crow will handle requests on
         self_t& port(std::uint16_t port)
         {
             port_ = port;
             return *this;
         }
 
-        /// Get the port that Crow will handle requests on
+        /// \brief Get the port that Crow will handle requests on
         std::uint16_t port()
         {
             return port_;
         }
 
-        /// Set the connection timeout in seconds (default is 5)
+        /// \brief Set the connection timeout in seconds (default is 5)
         self_t& timeout(std::uint8_t timeout)
         {
             timeout_ = timeout;
             return *this;
         }
 
-        /// Set the server name
+        /// \brief Set the server name
         self_t& server_name(std::string server_name)
         {
             server_name_ = server_name;
             return *this;
         }
 
-        /// The IP address that Crow will handle requests on (default is 0.0.0.0)
+        /// \brief The IP address that Crow will handle requests on (default is 0.0.0.0)
         self_t& bindaddr(std::string bindaddr)
         {
             bindaddr_ = bindaddr;
             return *this;
         }
-        
-        /// Get the address that Crow will handle requests on
+
+        /// \brief Get the address that Crow will handle requests on
         std::string bindaddr()
         {
             return bindaddr_;
         }
 
-        /// Run the server on multiple threads using all available threads
+        /// \brief Run the server on multiple threads using all available threads
         self_t& multithreaded()
         {
             return concurrency(std::thread::hardware_concurrency());
         }
 
-        /// Run the server on multiple threads using a specific number
+        /// \brief Run the server on multiple threads using a specific number
         self_t& concurrency(std::uint16_t concurrency)
         {
             if (concurrency < 2) // Crow can have a minimum of 2 threads running
@@ -13492,30 +13897,28 @@ namespace crow
             concurrency_ = concurrency;
             return *this;
         }
-        
-        /// Get the number of threads that server is using
+
+        /// \brief Get the number of threads that server is using
         std::uint16_t concurrency()
         {
             return concurrency_;
         }
 
-        /// Set the server's log level
-
+        /// \brief Set the server's log level
         ///
-        /// Possible values are:<br>
-        /// crow::LogLevel::Debug       (0)<br>
-        /// crow::LogLevel::Info        (1)<br>
-        /// crow::LogLevel::Warning     (2)<br>
-        /// crow::LogLevel::Error       (3)<br>
-        /// crow::LogLevel::Critical    (4)<br>
+        /// Possible values are:
+        /// - crow::LogLevel::Debug       (0)
+        /// - crow::LogLevel::Info        (1)
+        /// - crow::LogLevel::Warning     (2)
+        /// - crow::LogLevel::Error       (3)
+        /// - crow::LogLevel::Critical    (4)
         self_t& loglevel(LogLevel level)
         {
             crow::logger::setLogLevel(level);
             return *this;
         }
 
-        /// Set the response body size (in bytes) beyond which Crow automatically streams responses (Default is 1MiB)
-
+        /// \brief Set the response body size (in bytes) beyond which Crow automatically streams responses (Default is 1MiB)
         ///
         /// Any streamed response is unaffected by Crow's timer, and therefore won't timeout before a response is fully sent.
         self_t& stream_threshold(size_t threshold)
@@ -13524,19 +13927,37 @@ namespace crow
             return *this;
         }
 
-        /// Get the response body size (in bytes) beyond which Crow automatically streams responses
+        /// \brief Get the response body size (in bytes) beyond which Crow automatically streams responses
         size_t& stream_threshold()
         {
             return res_stream_threshold_;
         }
 
+        
         self_t& register_blueprint(Blueprint& blueprint)
         {
             router_.register_blueprint(blueprint);
             return *this;
         }
 
-        /// Set a custom duration and function to run on every tick
+        /// \brief Set the function to call to handle uncaught exceptions generated in routes (Default generates error 500).
+        ///
+        /// The function must have the following signature: void(crow::response&).
+        /// It must set the response passed in argument to the function, which will be sent back to the client.
+        /// See Router::default_exception_handler() for the default implementation.
+        template<typename Func>
+        self_t& exception_handler(Func&& f)
+        {
+            router_.exception_handler() = std::forward<Func>(f);
+            return *this;
+        }
+
+        std::function<void(crow::response&)>& exception_handler()
+        {
+            return router_.exception_handler();
+        }
+
+        /// \brief Set a custom duration and function to run on every tick
         template<typename Duration, typename Func>
         self_t& tick(Duration d, Func f)
         {
@@ -13546,6 +13967,7 @@ namespace crow
         }
 
 #ifdef CROW_ENABLE_COMPRESSION
+        
         self_t& use_compression(compression::algorithm algorithm)
         {
             comp_algorithm_ = algorithm;
@@ -13563,62 +13985,57 @@ namespace crow
             return compression_used_;
         }
 #endif
-        /// A wrapper for `validate()` in the router
 
-        ///
-        /// Go through the rules, upgrade them if possible, and add them to the list of rules
-        void validate()
+        /// \brief Apply blueprints
+        void add_blueprint()
         {
-            if (!validated_)
+#if defined(__APPLE__) || defined(__MACH__)
+            if (router_.blueprints().empty()) return;
+#endif
+
+            for (Blueprint* bp : router_.blueprints())
             {
+                if (bp->static_dir().empty()) continue;
 
-#ifndef CROW_DISABLE_STATIC_DIR
+                auto static_dir_ = crow::utility::normalize_path(bp->static_dir());
 
-                // stat on windows doesn't care whether '/' or '\' is being used. on Linux however, using '\' doesn't work. therefore every instance of '\' gets replaced with '/' then a check is done to make sure the directory ends with '/'.
-                std::string static_dir_(CROW_STATIC_DIRECTORY);
-                std::replace(static_dir_.begin(), static_dir_.end(), '\\', '/');
-                if (static_dir_[static_dir_.length() - 1] != '/')
-                    static_dir_ += '/';
-
-                route<crow::black_magic::get_parameter_tag(CROW_STATIC_ENDPOINT)>(CROW_STATIC_ENDPOINT)([static_dir_](crow::response& res, std::string file_path_partial) {
+                bp->new_rule_tagged<crow::black_magic::get_parameter_tag(CROW_STATIC_ENDPOINT)>(CROW_STATIC_ENDPOINT)([static_dir_](crow::response& res, std::string file_path_partial) {
                     utility::sanitize_filename(file_path_partial);
                     res.set_static_file_info_unsafe(static_dir_ + file_path_partial);
                     res.end();
                 });
-
-#if defined(__APPLE__) || defined(__MACH__)
-                if (!router_.blueprints().empty())
-#endif
-                {
-                    for (Blueprint* bp : router_.blueprints())
-                    {
-                        if (!bp->static_dir().empty())
-                        {
-                            // stat on windows doesn't care whether '/' or '\' is being used. on Linux however, using '\' doesn't work. therefore every instance of '\' gets replaced with '/' then a check is done to make sure the directory ends with '/'.
-                            std::string static_dir_(bp->static_dir());
-                            std::replace(static_dir_.begin(), static_dir_.end(), '\\', '/');
-                            if (static_dir_[static_dir_.length() - 1] != '/')
-                                static_dir_ += '/';
-
-                            bp->new_rule_tagged<crow::black_magic::get_parameter_tag(CROW_STATIC_ENDPOINT)>(CROW_STATIC_ENDPOINT)([static_dir_](crow::response& res, std::string file_path_partial) {
-                                utility::sanitize_filename(file_path_partial);
-                                res.set_static_file_info_unsafe(static_dir_ + file_path_partial);
-                                res.end();
-                            });
-                        }
-                    }
-                }
-#endif
-
-                router_.validate();
-                validated_ = true;
             }
+
+            router_.validate_bp();
         }
 
-        /// Run the server
+        /// \brief Go through the rules, upgrade them if possible, and add them to the list of rules
+        void add_static_dir()
+        {
+            if (are_static_routes_added()) return;
+            auto static_dir_ = crow::utility::normalize_path(CROW_STATIC_DIRECTORY);
+
+            route<crow::black_magic::get_parameter_tag(CROW_STATIC_ENDPOINT)>(CROW_STATIC_ENDPOINT)([static_dir_](crow::response& res, std::string file_path_partial) {
+                utility::sanitize_filename(file_path_partial);
+                res.set_static_file_info_unsafe(static_dir_ + file_path_partial);
+                res.end();
+            });
+            set_static_routes_added();
+        }
+
+        /// \brief A wrapper for `validate()` in the router
+        void validate()
+        {
+            router_.validate();
+        }
+
+        /// \brief Run the server
         void run()
         {
-
+#ifndef CROW_DISABLE_STATIC_DIR
+            add_blueprint();
+            add_static_dir();
+#endif
             validate();
 
 #ifdef CROW_ENABLE_SSL
@@ -13648,7 +14065,7 @@ namespace crow
             }
         }
 
-        /// Non-blocking version of \ref run()
+        /// \brief Non-blocking version of \ref run()
         ///
         /// The output from this method needs to be saved into a variable!
         /// Otherwise the call will be made on the same thread.
@@ -13659,7 +14076,7 @@ namespace crow
             });
         }
 
-        /// Stop the server
+        /// \brief Stop the server
         void stop()
         {
 #ifdef CROW_ENABLE_SSL
@@ -13691,7 +14108,7 @@ namespace crow
             websockets_.erase(std::remove(websockets_.begin(), websockets_.end(), conn), websockets_.end());
         }
 
-        /// Print the routing paths defined for each HTTP method
+        /// \brief Print the routing paths defined for each HTTP method
         void debug_print()
         {
             CROW_LOG_DEBUG << "Routing:";
@@ -13701,7 +14118,7 @@ namespace crow
 
 #ifdef CROW_ENABLE_SSL
 
-        /// Use certificate and key files for SSL
+        /// \brief Use certificate and key files for SSL
         self_t& ssl_file(const std::string& crt_filename, const std::string& key_filename)
         {
             ssl_used_ = true;
@@ -13714,7 +14131,7 @@ namespace crow
             return *this;
         }
 
-        /// Use .pem file for SSL
+        /// \brief Use `.pem` file for SSL
         self_t& ssl_file(const std::string& pem_filename)
         {
             ssl_used_ = true;
@@ -13726,7 +14143,7 @@ namespace crow
             return *this;
         }
 
-        /// Use certificate chain and key files for SSL
+        /// \brief Use certificate chain and key files for SSL
         self_t& ssl_chainfile(const std::string& crt_filename, const std::string& key_filename)
         {
             ssl_used_ = true;
@@ -13751,6 +14168,7 @@ namespace crow
             return ssl_used_;
         }
 #else
+        
         template<typename T, typename... Remain>
         self_t& ssl_file(T&&, Remain&&...)
         {
@@ -13807,7 +14225,7 @@ namespace crow
             return utility::get_element_by_type<T, Middlewares...>(middlewares_);
         }
 
-        /// Wait until the server has properly started
+        /// \brief Wait until the server has properly started
         void wait_for_server_start()
         {
             {
@@ -13833,7 +14251,7 @@ namespace crow
                 black_magic::tuple_extract<Middlewares, decltype(fwd)>(fwd))...);
         }
 
-        /// Notify anything using `wait_for_server_start()` to proceed
+        /// \brief Notify anything using \ref wait_for_server_start() to proceed
         void notify_server_start()
         {
             std::unique_lock<std::mutex> lock(start_mutex_);
@@ -13841,17 +14259,24 @@ namespace crow
             cv_started_.notify_all();
         }
 
+        void set_static_routes_added() {
+            static_routes_added_ = true;
+        }
+
+        bool are_static_routes_added() {
+            return static_routes_added_;
+        }
 
     private:
         std::uint8_t timeout_{5};
         uint16_t port_ = 80;
         uint16_t concurrency_ = 2;
         uint64_t max_payload_{UINT64_MAX};
-        bool validated_ = false;
         std::string server_name_ = std::string("Crow/") + VERSION;
         std::string bindaddr_ = "0.0.0.0";
         size_t res_stream_threshold_ = 1048576;
         Router router_;
+        bool static_routes_added_{false};
 
 #ifdef CROW_ENABLE_COMPRESSION
         compression::algorithm comp_algorithm_;
@@ -13878,8 +14303,14 @@ namespace crow
         std::mutex start_mutex_;
         std::vector<crow::websocket::connection*> websockets_;
     };
+
+    /// \brief Alias of Crow<Middlewares...>. Useful if you want
+    /// a instance of an Crow application that require Middlewares
     template<typename... Middlewares>
     using App = Crow<Middlewares...>;
+
+    /// \brief Alias of Crow<>. Useful if you want a instance of
+    /// an Crow application that doesn't require of Middlewares
     using SimpleApp = Crow<>;
 } // namespace crow
 
