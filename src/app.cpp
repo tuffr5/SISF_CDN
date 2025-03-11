@@ -408,8 +408,15 @@ int main(int argc, char *argv[])
 		return out.str(); });
 
 	CROW_ROUTE(app, "/inventory")
-	([]()
+	([](const crow::request &req)
 	 {
+		std::string server_root = SERVER_ROOT;
+
+		if(req.headers.find("X-URL-Base") != req.headers.end()) {
+			server_root = req.headers["X-URL-Base"];
+		}
+
+
 		std::stringstream out;
 
 		out << "<html>\n";
@@ -466,7 +473,7 @@ int main(int argc, char *argv[])
 			}
 			toadd << "</td>\n";
 
-			toadd << "\t<td>" << "precomputed://" << SERVER_ROOT << kvpair.first << "</td>\n";
+			toadd << "\t<td>" << "precomputed://" << server_root << kvpair.first << "</td>\n";
 			toadd << "</tr>\n";
 
 			sample_table[this_name] = toadd.str();
