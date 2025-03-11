@@ -34,7 +34,9 @@
 int port = 6000;
 int THREAD_COUNT = 32;
 bool READ_ONLY_MODE = false;
+
 std::string DATA_PATH = "./data/";
+std::string SERVER_ROOT = "https://server/";
 
 using json = nlohmann::json;
 using basic_json = nlohmann::json;
@@ -450,7 +452,7 @@ int main(int argc, char *argv[])
 			}
 			toadd << "</td>\n";
 
-			toadd << "\t<td>" << "precomputed://https://ntracer2.cai-lab.org/data2/" << kvpair.first << "</td>\n";
+			toadd << "\t<td>" << "precomputed://" << server_root << kvpair.first << "</td>\n";
 			toadd << "</tr>\n";
 
 			sample_table[this_name] = toadd.str();
