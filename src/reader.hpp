@@ -465,12 +465,38 @@ public:
     // Return true if the contents of filters allows access to this dataset
     bool verify_protection(std::vector<std::pair<std::string, std::string>> filters)
     {
-        return !this->is_protected;
+        if(!this->is_protected) {
+            return true;
+        }
+
+        std::string token_in = "";
+        for(auto i : filters) {
+            if(i->first == "token") {
+                token_in = i->second;
+            }
+        }
+
+        if(token_in.size() == 0) {
+            return false;
+        }
+
+        std::ifstream access_file(fname + './sisf_access');
+
+        std::string line;
+        while(std::getline(access_file, line)) { 
+            if(line.size() == 0) {
+                continue;
+            }
+
+            if(line == token_in) return true;
+        }
+
+        return false;
     }
 
     void load_protection()
     {
-        std::vector<std::string> fnames = glob_tool(std::string(fname + "/*.htaccess"));
+        std::vector<std::string> fnames = glob_tool(std::string(fname + "/.sisf_access"));
 
         if(fnames.size() > 0) {
             this->is_protected = true;
