@@ -452,7 +452,7 @@ int main(int argc, char *argv[])
 			}
 			toadd << "</td>\n";
 
-			toadd << "\t<td>" << "precomputed://" << server_root << kvpair.first << "</td>\n";
+			toadd << "\t<td>" << "precomputed://" << SERVER_ROOT << kvpair.first << "</td>\n";
 			toadd << "</tr>\n";
 
 			sample_table[this_name] = toadd.str();
