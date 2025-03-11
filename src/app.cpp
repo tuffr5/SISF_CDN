@@ -37,6 +37,7 @@ bool READ_ONLY_MODE = false;
 
 std::string DATA_PATH = "./data/";
 std::string SERVER_ROOT = "https://server/";
+const std::string VERSION_STRING = "V0-6-0"
 
 using json = nlohmann::json;
 using basic_json = nlohmann::json;
@@ -1623,13 +1624,13 @@ int main(int argc, char *argv[])
 			return;
 		}
 
-		if(!archive_search.verify_protection(filters)) {
+		archive_reader * reader = archive_search->second;
+
+		if(!reader->verify_protection(filters)) {
 			res.code = crow::status::FORBIDDEN;
 			res.end();
 			return;
 		}
-
-		archive_reader * reader = archive_search->second;
 
 		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
 		// <xBegin>-<xEnd>_<yBegin>-<yEnd>_<zBegin>-<zEnd>
