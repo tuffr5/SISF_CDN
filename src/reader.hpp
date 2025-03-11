@@ -471,8 +471,8 @@ public:
 
         std::string token_in = "";
         for(auto i : filters) {
-            if(i->first == "token") {
-                token_in = i->second;
+            if(i.first == "token") {
+                token_in = i.second;
             }
         }
 
