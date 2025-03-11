@@ -320,7 +320,7 @@ int main(int argc, char *argv[])
 
 			for (const auto &[key, value] : req->headers)
 			{
-				cout << key << ": " << value << endl;
+				out << key << ": " << value << std::endl;
 			}
 
 			return out.str();
