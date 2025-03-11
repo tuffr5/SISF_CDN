@@ -312,6 +312,20 @@ int main(int argc, char *argv[])
 	([]()
 	 { return "Server is up!"; });
 
+	CROW_ROUTE(app, "/debug_headers")
+	(
+		[](const crow::request &req)
+		{
+			std::stringstream out;
+
+			for (const auto &[key, value] : req->headers)
+			{
+				cout << key << ": " << value << endl;
+			}
+
+			return out.str();
+		});
+
 	CROW_ROUTE(app, "/performance")
 	([]()
 	 {
