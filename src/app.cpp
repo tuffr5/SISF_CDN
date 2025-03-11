@@ -412,10 +412,9 @@ int main(int argc, char *argv[])
 	 {
 		std::string server_root = SERVER_ROOT;
 
-		if(req.headers.find("X-URL-Base") != req.headers.end()) {
-			server_root = req.headers.at("X-URL-Base");
+		if (auto search = req.headers.find("X-URL-Base"); search != req.headers.end()) {
+			server_root = search->second;
 		}
-
 
 		std::stringstream out;
 
