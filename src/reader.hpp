@@ -480,7 +480,7 @@ public:
             return false;
         }
 
-        std::ifstream access_file(fname + "./sisf_access");
+        std::ifstream access_file(fname + "/.sisf_access");
 
         std::string line;
         while(std::getline(access_file, line)) {
