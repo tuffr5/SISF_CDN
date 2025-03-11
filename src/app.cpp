@@ -34,10 +34,12 @@
 int port = 6000;
 int THREAD_COUNT = 32;
 bool READ_ONLY_MODE = false;
+
 std::string DATA_PATH = "./data/";
+std::string SERVER_ROOT = "https://server/";
+const std::string VERSION_STRING = "V0-6-0";
 
 using json = nlohmann::json;
-using basic_json = nlohmann::json;
 
 typedef std::tuple<float, float, float, float, int> swc_line;
 typedef std::tuple<int, float, float, float, float, int> swc_line_input;
@@ -84,8 +86,6 @@ void load_inventory()
 	}
 
 	std::cout << "|====================================================|" << std::endl;
-
-
 }
 
 void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, size_t> data_shape, size_t channel_count, std::string filter_name, std::string filter_param)
@@ -126,7 +126,7 @@ void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, siz
 		for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
 		{
 			float v = data[i];
-			
+
 			v /= std::numeric_limits<uint16_t>::max();
 			v = log(v);
 			v *= gamma;
@@ -312,6 +312,20 @@ int main(int argc, char *argv[])
 	([]()
 	 { return "Server is up!"; });
 
+	CROW_ROUTE(app, "/debug_headers")
+	(
+		[](const crow::request &req)
+		{
+			std::stringstream out;
+
+			for (const auto &[key, value] : req.headers)
+			{
+				out << key << ": " << value << std::endl;
+			}
+
+			return out.str();
+		});
+
 	CROW_ROUTE(app, "/performance")
 	([]()
 	 {
@@ -394,8 +408,14 @@ int main(int argc, char *argv[])
 		return out.str(); });
 
 	CROW_ROUTE(app, "/inventory")
-	([]()
+	([](const crow::request &req)
 	 {
+		std::string server_root = SERVER_ROOT;
+
+		if (auto search = req.headers.find("X-URL-Base"); search != req.headers.end()) {
+			server_root = search->second;
+		}
+
 		std::stringstream out;
 
 		out << "<html>\n";
@@ -452,7 +472,7 @@ int main(int argc, char *argv[])
 			}
 			toadd << "</td>\n";
 
-			toadd << "\t<td>" << "precomputed://https://ntracer2.cai-lab.org/data2/" << kvpair.first << "</td>\n";
+			toadd << "\t<td>" << "precomputed://" << server_root << kvpair.first << "</td>\n";
 			toadd << "</tr>\n";
 
 			sample_table[this_name] = toadd.str();
@@ -472,9 +492,11 @@ int main(int argc, char *argv[])
 
 	//	ENDPOINT: /data/<string>/info
 	CROW_ROUTE(app, "/<string>/info")
-	([](crow::response &res, std::string data_id)
+	([](crow::response &res, std::string data_id_in)
 	 {
-		data_id = str_first(data_id, '+');
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
+
 		auto archive_search = archive_inventory.find(data_id);
 
 		if(archive_search == archive_inventory.end()) {
@@ -484,7 +506,7 @@ int main(int argc, char *argv[])
 
 		archive_reader * reader = archive_search->second;
 
-		std::vector<basic_json> scales;
+		std::vector<json> scales;
 		for(size_t scale : reader->scales) {
 			std::tuple<size_t, size_t, size_t> res_scaled = reader->get_res(scale);
 			std::vector<uint32_t> res = {
@@ -493,16 +515,12 @@ int main(int argc, char *argv[])
 				(uint32_t) std::get<2>(res_scaled)
 			};
 
-			basic_json to_add;
+			json to_add;
 			to_add["chunk_sizes"] = {
-				//{64, 1, 1},
-				//{1, 64, 1},
-				//{1, 1, 64}
 				{256, 256, 1  },
 				{256, 1,   256},
 				{1,   256, 256},
 				{32, 32, 32},
-
 			};
 
 			to_add["encoding"] = "raw";
@@ -532,7 +550,7 @@ int main(int argc, char *argv[])
     	res.end(); });
 
 	CROW_ROUTE(app, "/<string>/tracing/<string>/<string>")
-	([](const crow::request &req, crow::response &res, std::string data_id, std::string pt_in_s1, std::string pt_in_s2)
+	([](const crow::request &req, crow::response &res, std::string data_id_in, std::string pt_in_s1, std::string pt_in_s2)
 	 {
 		auto soma_param = req.url_params.get("is_soma");
 		bool is_soma = soma_param != nullptr && strcmp(soma_param, "true") == 0;
@@ -547,7 +565,8 @@ int main(int argc, char *argv[])
 			return;
 		}
 
-		data_id = str_first(data_id, '+');
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
 
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
@@ -557,20 +576,20 @@ int main(int argc, char *argv[])
 		archive_reader * reader = archive_search->second;
 
 		if(pt1[0] < 0 || pt1[1] < 0 || pt1[2] < 0 || pt1[0] >= reader->sizex || pt1[1] >= reader->sizey || pt1[2] >= reader->sizez) {
-			res.code = 400;
+			res.code = crow::status::BAD_REQUEST;
 			res.end("Pt 1 out of bounds.");
 			return;
 		}
 
 		if(pt2[0] < 0 || pt2[1] < 0 || pt2[2] < 0 || pt2[0] >= reader->sizex || pt2[1] >= reader->sizey || pt2[2] >= reader->sizez) {
-			res.code = 400;
+			res.code = crow::status::BAD_REQUEST;
 			res.end("Pt 2 out of bounds.");
 			return;
 		}
 
 		if (is_soma) {
 			if (pt1[2] != pt2[2]) {
-				res.code = 400;
+				res.code = crow::status::BAD_REQUEST;
 				res.end("Soma tracing requires both points to be in the same z slice.");
 				return;
 			}
@@ -783,9 +802,10 @@ int main(int argc, char *argv[])
 
 	// @app.route("/meanshift/<data_id>/<point>/")
 	CROW_ROUTE(app, "/<string>/meanshift/<string>")
-	([](crow::response &res, std::string data_id, std::string pt_in_s)
+	([](crow::response &res, std::string data_id_in, std::string pt_in_s)
 	 {
-		data_id = str_first(data_id, '+');
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
 			
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
@@ -915,12 +935,13 @@ int main(int argc, char *argv[])
 		res.end(); });
 
 	CROW_ROUTE(app, "/<string>/skeleton/segment_properties/info")
-	([](crow::response &res, std::string data_id)
+	([](crow::response &res, std::string data_id_in)
 	 {	
-		data_id = str_first(data_id, '+');
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
 
-		std::vector<basic_json> ids = {}; // array of std::string, numbers?
-		std::vector<basic_json> values = {}; // array of std::string
+		std::vector<json> ids = {}; // array of std::string, numbers?
+		std::vector<json> values = {}; // array of std::string
 
 		std::vector<std::string> trace_file = glob_tool(DATA_PATH + data_id + "/traces.sql");
 
@@ -978,13 +999,14 @@ int main(int argc, char *argv[])
 		return crow::response(req.body); });
 
 	CROW_ROUTE(app, "/<string>/skeleton_api/delete/<int>")
-	([](std::string data_id, int neuron_id)
+	([](std::string data_id_in, int neuron_id)
 	 {
 		if(READ_ONLY_MODE) {
 			return crow::response(crow::status::BAD_REQUEST);
 		}
 
-		data_id = str_first(data_id, '+');
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
 
 		std::vector<std::string> trace_file = glob_tool(DATA_PATH + data_id + "/traces.sql");
 
@@ -1010,13 +1032,14 @@ int main(int argc, char *argv[])
 
 		return crow::response( response.dump() ); });
 
-	CROW_ROUTE(app, "/<string>/skeleton_api/replace/<int>").methods("POST"_method)([](const crow::request &req, std::string data_id, int neuron_id)
+	CROW_ROUTE(app, "/<string>/skeleton_api/replace/<int>").methods("POST"_method)([](const crow::request &req, std::string data_id_in, int neuron_id)
 																				   {
 		if(READ_ONLY_MODE) {
 			return crow::response(crow::status::BAD_REQUEST);
 		}
 
-		data_id = str_first(data_id, '+');
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
 
 		crow::multipart::message msg(req);
 
@@ -1140,7 +1163,7 @@ int main(int argc, char *argv[])
 
 
 		json response = {};
-		response["neuronids"] = std::vector<basic_json>();
+		response["neuronids"] = std::vector<json>();
 
 		std::stringstream out("");
 		for(stringvec b : neurons) { 
@@ -1149,13 +1172,14 @@ int main(int argc, char *argv[])
 		
 		return crow::response( response.dump() ); });
 
-	CROW_ROUTE(app, "/<string>/skeleton_api/upload").methods("POST"_method)([](const crow::request &req, std::string data_id)
+	CROW_ROUTE(app, "/<string>/skeleton_api/upload").methods("POST"_method)([](const crow::request &req, std::string data_id_in)
 																			{
 		if(READ_ONLY_MODE) {
 			return crow::response(crow::status::BAD_REQUEST);
 		}
 
-		data_id = str_first(data_id, '+');
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
 
 		crow::multipart::message msg(req);
 
@@ -1270,9 +1294,10 @@ int main(int argc, char *argv[])
 		return crow::response( response.dump() ); });
 
 	CROW_ROUTE(app, "/<string>/skeleton_api/get/<int>")
-	([](crow::response &res, std::string data_id, int skeleton_id)
+	([](crow::response &res, std::string data_id_in, int skeleton_id)
 	 {
-		data_id = str_first(data_id, '+');
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
 
 		callback_vector neuron;
 		{
@@ -1295,9 +1320,10 @@ int main(int argc, char *argv[])
 		res.end(); });
 
 	CROW_ROUTE(app, "/<string>/skeleton/<int>")
-	([](crow::response &res, std::string data_id, int skeleton_id)
+	([](crow::response &res, std::string data_id_in, int skeleton_id)
 	 {
-		data_id = str_first(data_id, '+');
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
 
 		callback_vector neuron;
 		{
@@ -1369,9 +1395,11 @@ int main(int argc, char *argv[])
 
 	//	ENDPOINT: /<string>/raw_access/<c>,<i>,<j>,<k>/info
 	CROW_ROUTE(app, "/<string>/raw_access/<string>/info")
-	([](crow::response &res, std::string data_id, std::string chunk_key)
+	([](crow::response &res, std::string data_id_in, std::string chunk_key)
 	 {
-		data_id = str_first(data_id, '+');
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
+
 		auto archive_search = archive_inventory.find(data_id);
 
 		if(archive_search == archive_inventory.end()) {
@@ -1391,7 +1419,7 @@ int main(int argc, char *argv[])
 			return;
 		}
 
-		std::vector<basic_json> scales;
+		std::vector<json> scales;
 		for(size_t scale : reader->scales) {
 			std::tuple<size_t, size_t, size_t> res_scaled = reader->get_res(scale);
 			std::vector<uint32_t> res = {
@@ -1400,7 +1428,7 @@ int main(int argc, char *argv[])
 				(uint32_t) std::get<2>(res_scaled)
 			};
 
-			basic_json to_add;
+			json to_add;
 			to_add["chunk_sizes"] = {
 				//{64, 1, 1},
 				//{1, 64, 1},
@@ -1449,32 +1477,11 @@ int main(int argc, char *argv[])
 
 	// ENDPOINT: /<data_id>/raw_access/<c>,<i>,<j>,<k>/<resolution>/<key>-<key>-<key>
 	CROW_ROUTE(app, "/<string>/raw_access/<string>/<string>/<string>")
-	([](crow::response &res, std::string data_id, std::string chunk_key, std::string resolution_id, std::string tile_key)
+	([](crow::response &res, std::string data_id_in, std::string chunk_key, std::string resolution_id, std::string tile_key)
 	 {
-		std::vector<std::string> data_id_parts = str_split(data_id, '+');
-		std::vector<std::pair<std::string, std::string>> filters;
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
 
-		if(data_id_parts.size() == 2) {
-				std::string filter_params = data_id_parts[1];
-				std::vector<std::string> filter_keys = str_split(filter_params, '&');
-				for(auto filter_key : filter_keys) {
-					std::vector<std::string> filter_parsed = str_split(filter_key, '=');
-
-					if(filter_parsed.size() == 2) {
-						filters.push_back( {filter_parsed[0], filter_parsed[1]} );
-					} else {
-						//std::cout << "Failed to parse filter " << filter_key << std::endl;
-					}
-				}
-		} else {
-			//std::cout << "Failed to parse filterset." << std::endl;
-		}
-
-		//for (const auto& pair : filters) {
-        //	std::cout << "Key: " << pair.first << ", Value: " << pair.second << std::endl;
-    	//}
-
-		data_id = data_id_parts[0];
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
 			res.end();
@@ -1603,34 +1610,13 @@ int main(int argc, char *argv[])
 	// @app.route("/data/<data_id>/<resolution>/<key>-<key>-<key>")
 	// This has to be last in the route list because it acts as a wildcard
 	CROW_ROUTE(app, "/<string>/<string>/<string>")
-	([](crow::response &res, std::string data_id, std::string resolution_id, std::string tile_key)
+	([](crow::response &res, std::string data_id_in, std::string resolution_id, std::string tile_key)
 	 {
 		auto begin = now();
 		
-		std::vector<std::string> data_id_parts = str_split(data_id, '+');
-		std::vector<std::pair<std::string, std::string>> filters;
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
 
-		if(data_id_parts.size() == 2) {
-				std::string filter_params = data_id_parts[1];
-				std::vector<std::string> filter_keys = str_split(filter_params, '&');
-				for(auto filter_key : filter_keys) {
-					std::vector<std::string> filter_parsed = str_split(filter_key, '=');
-
-					if(filter_parsed.size() == 2) {
-						filters.push_back( {filter_parsed[0], filter_parsed[1]} );
-					} else {
-						//std::cout << "Failed to parse filter " << filter_key << std::endl;
-					}
-				}
-		} else {
-			//std::cout << "Failed to parse filterset." << std::endl;
-		}
-
-		//for (const auto& pair : filters) {
-        //	std::cout << "Key: " << pair.first << ", Value: " << pair.second << std::endl;
-    	//}
-
-		data_id = data_id_parts[0];
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
 			res.end();
@@ -1638,6 +1624,12 @@ int main(int argc, char *argv[])
 		}
 
 		archive_reader * reader = archive_search->second;
+
+		if(!reader->verify_protection(filters)) {
+			res.code = crow::status::FORBIDDEN;
+			res.end();
+			return;
+		}
 
 		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
 		// <xBegin>-<xEnd>_<yBegin>-<yEnd>_<zBegin>-<zEnd>

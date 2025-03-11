@@ -40,6 +40,43 @@ std::string str_first(const std::string &s, char del)
     return t;
 }
 
+std::pair<std::string, std::vector<std::pair<std::string, std::string>>> parse_filter_list(std::string data_id)
+{
+    std::vector<std::string> data_id_parts = str_split(data_id, '+');
+    std::string data_id_out = data_id_parts[0];
+
+    std::vector<std::pair<std::string, std::string>> filters_out;
+
+    if (data_id_parts.size() == 2)
+    {
+        std::string filter_params = data_id_parts[1];
+        std::vector<std::string> filter_keys = str_split(filter_params, '&');
+        for (auto filter_key : filter_keys)
+        {
+            std::vector<std::string> filter_parsed = str_split(filter_key, '=');
+
+            if (filter_parsed.size() == 2)
+            {
+                filters_out.push_back({filter_parsed[0], filter_parsed[1]});
+            }
+            else
+            {
+                // std::cout << "Failed to parse filter " << filter_key << std::endl;
+            }
+        }
+    }
+    else
+    {
+        // std::cout << "Failed to parse filterset." << std::endl;
+    }
+
+    // for (const auto& pair : filters) {
+    //	std::cout << "Key: " << pair.first << ", Value: " << pair.second << std::endl;
+    // }
+
+    return {data_id_out, filters_out};
+}
+
 // Function to compute the mean of a vector
 double mean(const std::vector<double> &data)
 {
@@ -163,7 +200,7 @@ struct astar_cell
         {
             color_intensity += color_vector[i];
         }
-        //color_intensity /= channel_count;
+        // color_intensity /= channel_count;
     }
 
     void load_color(archive_reader *image, int window)
@@ -284,7 +321,6 @@ const std::vector<std::tuple<int, int, int, double>>
         {1, 1, -1, 1.7320508075688772},
         {1, 1, 0, 1.4142135623730951},
         {1, 1, 1, 1.7320508075688772}};
-
 
 const std::vector<std::tuple<int, int, int, double>>
     neighbor_steps_no_z = {

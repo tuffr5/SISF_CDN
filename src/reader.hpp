@@ -68,7 +68,8 @@ struct global_chunk_line
     uint16_t *ptr;
 };
 
-enum ArchiveType {
+enum ArchiveType
+{
     SISF,
     ZARR
 };
@@ -159,12 +160,12 @@ public:
 
         std::ifstream file(meta_fname, std::ios::in | std::ios::binary);
 
-        //if (file.fail())
+        // if (file.fail())
         //{
-        //    std::cerr << "Fopen failed (chunk metadata)" << std::endl;
-        //    found = false
-        //    return;
-        //}
+        //     std::cerr << "Fopen failed (chunk metadata)" << std::endl;
+        //     found = false
+        //     return;
+        // }
 
         found = true;
 
@@ -245,7 +246,7 @@ public:
 
     uint16_t *load_chunk(size_t id, size_t sizex, size_t sizey, size_t sizez)
     {
-        const size_t out_buffer_size = sizex*sizey*sizez*sizeof(uint16_t);
+        const size_t out_buffer_size = sizex * sizey * sizez * sizeof(uint16_t);
         uint16_t *out = (uint16_t *)calloc(out_buffer_size, 1);
         metadata_entry *sel = load_meta_entry(id);
 
@@ -348,9 +349,10 @@ public:
 
             if (global_chunk_cache_mutex.try_lock_for(cache_lock_timeout))
             {
-                global_chunk_line * cache_line = global_chunk_cache + global_chunk_cache_last;
+                global_chunk_line *cache_line = global_chunk_cache + global_chunk_cache_last;
 
-                if (cache_line->ptr != 0) {
+                if (cache_line->ptr != 0)
+                {
                     free(cache_line->ptr);
                 }
 
@@ -426,6 +428,7 @@ public:
 class archive_reader
 {
 public:
+    bool is_protected = false;
     std::string fname; // "./example_dset"
     uint16_t channel_count;
     uint16_t archive_version; // 1 == current
@@ -444,28 +447,69 @@ public:
         fname = name_in;
         type = type_in;
 
-        switch(type) {
-            case SISF:
-                load_metadata_sisf();
-                break;
-            case ZARR:
-                load_metadata_zarr();
-                break;
+        switch (type)
+        {
+        case SISF:
+            load_metadata_sisf();
+            break;
+        case ZARR:
+            load_metadata_zarr();
+            break;
         }
+
+        load_protection();
     }
 
     ~archive_reader() {}
 
+    // Return true if the contents of filters allows access to this dataset
+    bool verify_protection(std::vector<std::pair<std::string, std::string>> filters)
+    {
+        if(!this->is_protected) {
+            return true;
+        }
+
+        std::string token_in = "";
+        for(auto i : filters) {
+            if(i.first == "token") {
+                token_in = i.second;
+            }
+        }
+
+        if(token_in.size() == 0) {
+            return false;
+        }
+
+        std::ifstream access_file(fname + "/.sisf_access");
+
+        std::string line;
+        while(std::getline(access_file, line)) {
+            std::cout << "Testing token " << line << " against " << token_in << std::endl;
+            if(line.size() == 0) {
+                continue;
+            }
+
+            if(line == token_in) return true;
+        }
+
+        return false;
+    }
+
+    void load_protection()
+    {
+        std::vector<std::string> fnames = glob_tool(std::string(fname + "/.sisf_access"));
+
+        if(fnames.size() > 0) {
+            this->is_protected = true;
+        }
+    }
+
     void load_metadata_zarr()
     {
         tensorstore::Context context = tensorstore::Context::Default();
-        auto store_future = tensorstore::Open({
-            {"driver", "zarr3"},
-            {"kvstore", {
-                {"driver", "file"},
-                {"path", fname}
-            }}
-        }, context, tensorstore::OpenMode::open, tensorstore::ReadWriteMode::read); 
+        auto store_future = tensorstore::Open({{"driver", "zarr3"},
+                                               {"kvstore", {{"driver", "file"}, {"path", fname}}}},
+                                              context, tensorstore::OpenMode::open, tensorstore::ReadWriteMode::read);
 
         auto store_result = store_future.result();
 
@@ -486,26 +530,29 @@ public:
         channel_count = 0;
 
         size_t i = 0;
-        for (const auto& dim : shape) {
-            switch(i) {
-                case 0: // x
-                    sizex = dim;
-                    break;
-                case 1: // y
-                    sizey = dim;
-                    break;
-                case 2: // z
-                    sizez = dim;
-                    break;
-                case 3: // c
-                    channel_count = dim;
-                    break;
+        for (const auto &dim : shape)
+        {
+            switch (i)
+            {
+            case 0: // x
+                sizex = dim;
+                break;
+            case 1: // y
+                sizey = dim;
+                break;
+            case 2: // z
+                sizez = dim;
+                break;
+            case 3: // c
+                channel_count = dim;
+                break;
             }
 
             i++;
         }
 
-        if(sizex == 0 || sizey == 0 || sizez == 0 || channel_count == 0) {
+        if (sizex == 0 || sizey == 0 || sizez == 0 || channel_count == 0)
+        {
             std::cerr << "Invalid rank in Zarr dataset [" << fname << "]. Found i=" << i << std::endl;
         }
 
@@ -522,31 +569,36 @@ public:
         if (!dim_units_result.ok())
         {
             std::cerr << "Error reading dimension_units from TensorStore: " << store_result.status() << std::endl;
-        } else {
+        }
+        else
+        {
             auto dim_units = dim_units_result.value();
 
-            for(size_t i = 0; i < dim_units.size(); i++) {
-                if(dim_units[i].has_value()) {
+            for (size_t i = 0; i < dim_units.size(); i++)
+            {
+                if (dim_units[i].has_value())
+                {
                     tensorstore::Unit u = dim_units[i].value();
 
                     // TODO Verify that unit is nm and scale properly
-                    
-                    switch(i) { 
-                        case 0: // x
-                            resx = u.multiplier;
-                            break;
-                        case 1: // y
-                            resy = u.multiplier;
-                            break;
-                        case 2: // z
-                            resz = u.multiplier;
-                            break;
-                        case 3: // c
-                            // Color does not have a unit
-                            break;
+
+                    switch (i)
+                    {
+                    case 0: // x
+                        resx = u.multiplier;
+                        break;
+                    case 1: // y
+                        resy = u.multiplier;
+                        break;
+                    case 2: // z
+                        resz = u.multiplier;
+                        break;
+                    case 3: // c
+                        // Color does not have a unit
+                        break;
                     }
 
-                    //std::cout << "Name: " << labels[i] << '\t' << u.to_string() << '\t' << u.base_unit << '\t' << u.multiplier << std::endl;
+                    // std::cout << "Name: " << labels[i] << '\t' << u.to_string() << '\t' << u.base_unit << '\t' << u.multiplier << std::endl;
                 }
             }
         }
@@ -559,7 +611,7 @@ public:
         mcounty = 1;
         mcountz = 1;
 
-        scales.push_back(1);        
+        scales.push_back(1);
     }
 
     void load_metadata_sisf()
@@ -736,7 +788,8 @@ public:
         // Allocate buffer for output
         uint16_t *out_buffer = (uint16_t *)calloc(buffer_size, 1);
 
-        if(type == SISF) {
+        if (type == SISF)
+        {
             // Define map for storing already decompressed chunks
             std::map<std::tuple<size_t, size_t, size_t, size_t, size_t>, uint16_t *> chunk_cache;
 
@@ -846,13 +899,13 @@ public:
 
                             // Calculate the coordinates of the input and output inside their respective buffers
                             const size_t coffset = ((x_in_chunk_offset - cxmin) * cysize * czsize) + // X
-                                                ((y_in_chunk_offset - cymin) * czsize) +          // Y
-                                                (z_in_chunk_offset - czmin);                      // Z
+                                                   ((y_in_chunk_offset - cymin) * czsize) +          // Y
+                                                   (z_in_chunk_offset - czmin);                      // Z
 
                             const size_t ooffset = (c * osizey * osizex * osizez) + // C
-                                                ((k - zs) * osizey * osizex) +   // Z
-                                                ((j - ys) * osizex) +            // Y
-                                                ((i - xs));                      // X
+                                                   ((k - zs) * osizey * osizex) +   // Z
+                                                   ((j - ys) * osizex) +            // Y
+                                                   ((i - xs));                      // X
 
                             out_buffer[ooffset] = chunk[coffset];
                         }
@@ -869,11 +922,13 @@ public:
             {
                 free(it->second);
             }
-        } else if (type == ZARR) {
+        }
+        else if (type == ZARR)
+        {
             tensorstore::Context context = tensorstore::Context::Default();
             auto store_future = tensorstore::Open({{"driver", "zarr3"},
                                                    {"kvstore", {{"driver", "file"}, {"path", fname}}}},
-                                                   context, tensorstore::OpenMode::open, tensorstore::ReadWriteMode::read);
+                                                  context, tensorstore::OpenMode::open, tensorstore::ReadWriteMode::read);
 
             auto store_result = store_future.result();
 
@@ -886,48 +941,51 @@ public:
                 auto store = std::move(store_result.value());
 
                 const size_t read_buffer_size = osizex * osizey * osizez * sizeof(uint16_t) * channel_count;
-                uint16_t * read_buffer = (uint16_t *) malloc(read_buffer_size);
-                
+                uint16_t *read_buffer = (uint16_t *)malloc(read_buffer_size);
+
                 auto array_result = tensorstore::Read<tensorstore::zero_origin>(
-                                 store | tensorstore::AllDims().SizedInterval(
-                                    {(tensorstore::Index)xs, (tensorstore::Index)ys, (tensorstore::Index)zs, 0},
-                                    {(tensorstore::Index)osizex, (tensorstore::Index)osizey, (tensorstore::Index)osizez, (tensorstore::Index)channel_count}
-                                )).result();
+                                        store | tensorstore::AllDims().SizedInterval(
+                                                    {(tensorstore::Index)xs, (tensorstore::Index)ys, (tensorstore::Index)zs, 0},
+                                                    {(tensorstore::Index)osizex, (tensorstore::Index)osizey, (tensorstore::Index)osizez, (tensorstore::Index)channel_count}))
+                                        .result();
 
-                if(array_result.ok()) {
-                        // tensorstore::Array<tensorstore::Shared<void>, -1, tensorstore::ArrayOriginKind::offset, tensorstore::ContainerKind::container>
-                        auto array = array_result.value();
+                if (array_result.ok())
+                {
+                    // tensorstore::Array<tensorstore::Shared<void>, -1, tensorstore::ArrayOriginKind::offset, tensorstore::ContainerKind::container>
+                    auto array = array_result.value();
 
-                        // TODO detect datatype automatically
-                        uint16_t * array_ptr = (uint16_t*) array.data();
+                    // TODO detect datatype automatically
+                    uint16_t *array_ptr = (uint16_t *)array.data();
 
-                        // std::cout << "s:" << array.num_elements() << std::endl;
-                        // Access example: std::cout << "T: " << array[{xs, ys, zs, 0}] << std::endl;
+                    // std::cout << "s:" << array.num_elements() << std::endl;
+                    // Access example: std::cout << "T: " << array[{xs, ys, zs, 0}] << std::endl;
 
-                        for (size_t c = 0; c < channel_count; c++)
+                    for (size_t c = 0; c < channel_count; c++)
+                    {
+                        for (size_t i = xs; i < xe; i++)
                         {
-                            for (size_t i = xs; i < xe; i++)
+                            for (size_t j = ys; j < ye; j++)
                             {
-                                for (size_t j = ys; j < ye; j++)
+                                for (size_t k = zs; k < ze; k++)
                                 {
-                                    for (size_t k = zs; k < ze; k++)
-                                    {
-                                        // Calculate the coordinates of the input and output inside their respective buffers
-                                        const size_t coffset = ((i - xs) * osizey * osizez * channel_count) + // X
-                                                               ((j - ys) * osizez * channel_count) +          // Y
-                                                               (k - zs) * channel_count + c;                  // Z and C
+                                    // Calculate the coordinates of the input and output inside their respective buffers
+                                    const size_t coffset = ((i - xs) * osizey * osizez * channel_count) + // X
+                                                           ((j - ys) * osizez * channel_count) +          // Y
+                                                           (k - zs) * channel_count + c;                  // Z and C
 
-                                        const size_t ooffset = (c * osizey * osizex * osizez) + // C
-                                                               ((k - zs) * osizey * osizex) +   // Z
-                                                               ((j - ys) * osizex) +            // Y
-                                                               ((i - xs));                      // X
+                                    const size_t ooffset = (c * osizey * osizex * osizez) + // C
+                                                           ((k - zs) * osizey * osizex) +   // Z
+                                                           ((j - ys) * osizex) +            // Y
+                                                           ((i - xs));                      // X
 
-                                        out_buffer[ooffset] = array_ptr[coffset];
-                                    }
+                                    out_buffer[ooffset] = array_ptr[coffset];
                                 }
                             }
                         }
-                } else {
+                    }
+                }
+                else
+                {
                     std::cerr << "Error reading from TensorStore: " << array_result.status() << std::endl;
                 }
             }
@@ -965,9 +1023,9 @@ public:
                   << "tile_counts=(" << mcountx << ',' << mcounty << ',' << mcountz << ") "
                   << "scales=[";
 
-        for(size_t n : scales)
+        for (size_t n : scales)
             std::cout << n << ',';
-                  
+
         std::cout << "]" << std::endl;
     }
 };
