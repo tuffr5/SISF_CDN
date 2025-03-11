@@ -413,7 +413,7 @@ int main(int argc, char *argv[])
 		std::string server_root = SERVER_ROOT;
 
 		if(req.headers.find("X-URL-Base") != req.headers.end()) {
-			server_root = req.headers["X-URL-Base"];
+			server_root = req.headers.at("X-URL-Base");
 		}
 
 
