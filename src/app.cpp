@@ -576,20 +576,20 @@ int main(int argc, char *argv[])
 		archive_reader * reader = archive_search->second;
 
 		if(pt1[0] < 0 || pt1[1] < 0 || pt1[2] < 0 || pt1[0] >= reader->sizex || pt1[1] >= reader->sizey || pt1[2] >= reader->sizez) {
-			res.code = 400;
+			res.code = crow::status::BAD_REQUEST;
 			res.end("Pt 1 out of bounds.");
 			return;
 		}
 
 		if(pt2[0] < 0 || pt2[1] < 0 || pt2[2] < 0 || pt2[0] >= reader->sizex || pt2[1] >= reader->sizey || pt2[2] >= reader->sizez) {
-			res.code = 400;
+			res.code = crow::status::BAD_REQUEST;
 			res.end("Pt 2 out of bounds.");
 			return;
 		}
 
 		if (is_soma) {
 			if (pt1[2] != pt2[2]) {
-				res.code = 400;
+				res.code = crow::status::BAD_REQUEST;
 				res.end("Soma tracing requires both points to be in the same z slice.");
 				return;
 			}
@@ -1619,6 +1619,12 @@ int main(int argc, char *argv[])
 
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
+			res.end();
+			return;
+		}
+
+		if(!archive_search.verify_protection(filters)) {
+			res.code = crow::status::FORBIDDEN;
 			res.end();
 			return;
 		}

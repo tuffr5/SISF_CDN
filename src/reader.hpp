@@ -426,6 +426,7 @@ public:
 class archive_reader
 {
 public:
+    bool is_protected = false;
     std::string fname; // "./example_dset"
     uint16_t channel_count;
     uint16_t archive_version; // 1 == current
@@ -452,9 +453,20 @@ public:
                 load_metadata_zarr();
                 break;
         }
+
+        load_protection();
     }
 
     ~archive_reader() {}
+
+    // Return true if the contents of filters allows access to this dataset
+    bool verify_protection(std::vector<std::pair<std::string, std::string>> filters) {
+        return !this->is_protected;
+    }
+
+    void load_protection() {
+        
+    }
 
     void load_metadata_zarr()
     {
