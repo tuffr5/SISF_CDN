@@ -40,7 +40,7 @@ std::string SERVER_ROOT = "https://server/";
 const std::string VERSION_STRING = "V0-6-0";
 
 using json = nlohmann::json;
-using basic_json = nlohmann::json;
+using json = nlohmann::json;
 
 typedef std::tuple<float, float, float, float, int> swc_line;
 typedef std::tuple<int, float, float, float, float, int> swc_line_input;
@@ -507,7 +507,7 @@ int main(int argc, char *argv[])
 
 		archive_reader * reader = archive_search->second;
 
-		std::vector<basic_json> scales;
+		std::vector<json> scales;
 		for(size_t scale : reader->scales) {
 			std::tuple<size_t, size_t, size_t> res_scaled = reader->get_res(scale);
 			std::vector<uint32_t> res = {
@@ -516,7 +516,7 @@ int main(int argc, char *argv[])
 				(uint32_t) std::get<2>(res_scaled)
 			};
 
-			basic_json to_add;
+			json to_add;
 			to_add["chunk_sizes"] = {
 				{256, 256, 1  },
 				{256, 1,   256},
@@ -941,8 +941,8 @@ int main(int argc, char *argv[])
 		//std::string, std::vector<std::pair<std::string, std::string>>
 		auto [data_id, filters] = parse_filter_list(data_id_in);
 
-		std::vector<basic_json> ids = {}; // array of std::string, numbers?
-		std::vector<basic_json> values = {}; // array of std::string
+		std::vector<json> ids = {}; // array of std::string, numbers?
+		std::vector<json> values = {}; // array of std::string
 
 		std::vector<std::string> trace_file = glob_tool(DATA_PATH + data_id + "/traces.sql");
 
@@ -1164,7 +1164,7 @@ int main(int argc, char *argv[])
 
 
 		json response = {};
-		response["neuronids"] = std::vector<basic_json>();
+		response["neuronids"] = std::vector<json>();
 
 		std::stringstream out("");
 		for(stringvec b : neurons) { 
@@ -1420,7 +1420,7 @@ int main(int argc, char *argv[])
 			return;
 		}
 
-		std::vector<basic_json> scales;
+		std::vector<json> scales;
 		for(size_t scale : reader->scales) {
 			std::tuple<size_t, size_t, size_t> res_scaled = reader->get_res(scale);
 			std::vector<uint32_t> res = {
@@ -1429,7 +1429,7 @@ int main(int argc, char *argv[])
 				(uint32_t) std::get<2>(res_scaled)
 			};
 
-			basic_json to_add;
+			json to_add;
 			to_add["chunk_sizes"] = {
 				//{64, 1, 1},
 				//{1, 64, 1},
