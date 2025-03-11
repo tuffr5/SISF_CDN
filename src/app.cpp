@@ -318,7 +318,7 @@ int main(int argc, char *argv[])
 		{
 			std::stringstream out;
 
-			for (const auto &[key, value] : req->headers)
+			for (const auto &[key, value] : req.headers)
 			{
 				out << key << ": " << value << std::endl;
 			}
