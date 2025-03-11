@@ -483,7 +483,8 @@ public:
         std::ifstream access_file(fname + "./sisf_access");
 
         std::string line;
-        while(std::getline(access_file, line)) { 
+        while(std::getline(access_file, line)) {
+            std::cout << "Testing token " << line << " against " << token_in << std::endl;
             if(line.size() == 0) {
                 continue;
             }
