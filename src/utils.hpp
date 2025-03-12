@@ -1,11 +1,14 @@
-#include <vector>
-#include <string>
 #include <istream>
 #include <sstream>
+
+#include <string>
 #include <algorithm> // std::sort
 #include <limits>
 #include <chrono>
+#include <vector>
+
 #include <cstdlib>
+#include <cstdint>
 
 std::string read_env_variable(std::string name)
 {
@@ -57,7 +60,14 @@ std::pair<std::string, std::vector<std::pair<std::string, std::string>>> parse_f
 
             if (filter_parsed.size() == 2)
             {
-                filters_out.push_back({filter_parsed[0], filter_parsed[1]});
+                std::string filter_name = filter_parsed[0];
+                std::string filter_param = filter_parsed[1];
+
+                std::transform(filter_name.begin(), filter_name.end(), filter_name.begin(),
+                               [](unsigned char c)
+                               { return std::tolower(c); });
+
+                filters_out.push_back({filter_name, filter_param});
             }
             else
             {
@@ -125,6 +135,71 @@ std::vector<double> denoiseSignal(const std::vector<double> &signal, double nois
 float gaussian(int x, int y, int z, float sigma)
 {
     return exp(-(x * x + y * y + z * z) / (2 * sigma * sigma)) / (sqrt(2 * M_PI) * sigma);
+}
+
+// CLAHE function for 16-bit images stored in a 1D array.
+// image: pointer to the image pixels (modified in place)
+// clipLimit: maximum allowed count in a histogram bin before clipping
+void clahe_1d(uint16_t *image, size_t data_size, uint32_t clipLimit)
+{
+    const int bins = 256; // number of histogram bins
+    const double bin_step = std::numeric_limits<uint16_t>::max() / bins;
+    const size_t pixel_cnt = data_size / sizeof(uint16_t);
+
+    std::vector<double> hist(bins, 0.0);
+
+    for (size_t i = 0; i < pixel_cnt; i++)
+    {
+        const uint16_t v = image[i];
+
+        int bin = v / bin_step;
+
+        bin = std::min(bin, bins - 1);
+        bin = std::max(0, bin);
+        
+        hist[bin] += 1.0;
+    }
+
+    // Clip the histogram: any bin count above clipLimit is reduced
+    // and the excess is collected.
+    uint64_t excess = 0;
+    for (size_t i = 0; i < bins; i++)
+    {
+        if (hist[i] > clipLimit)
+        {
+            excess += hist[i] - clipLimit;
+            hist[i] = clipLimit;
+        }
+    }
+
+    // Redistribute the excess evenly among all bins.
+    int redist = excess / bins;
+    for (size_t i = 0; i < bins; i++)
+    {
+        hist[i] += redist;
+    }
+
+    // 0 .. 1
+    double sum = 0.0;
+    for(size_t i = 0; i < bins; i++) {
+        hist[i] /= pixel_cnt;
+
+        sum += hist[i];
+        hist[i] = sum;
+    }
+
+    for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
+    {
+        // Get the original pixel value and compute its corresponding histogram bin.
+        const uint16_t v = image[i];
+
+        int bin = v / bin_step;
+
+        bin = std::min(bin, bins - 1);
+        bin = std::max(0, bin);
+
+        image[i] = hist[bin] * std::numeric_limits<uint16_t>::max();
+    }
 }
 
 // Define a structure to represent a cell in the grid
@@ -332,3 +407,195 @@ const std::vector<std::tuple<int, int, int, double>>
         {1, -1, 0, 1.4142135623730951},
         {1, 0, 0, 1.0},
         {1, 1, 0, 1.4142135623730951}};
+
+void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, size_t> data_shape, size_t channel_count, std::string filter_name, std::string filter_param)
+{
+    if (filter_name == "offset")
+    {
+        float off = std::stof(filter_param);
+        for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
+        {
+            float v = data[i];
+            v += off;
+
+            v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
+            v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
+
+            data[i] = v;
+        }
+    }
+
+    if (filter_name == "gamma")
+    {
+        float gamma = std::stof(filter_param);
+        for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
+        {
+            float v = data[i];
+            v = pow(v, gamma);
+
+            v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
+            v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
+
+            data[i] = v;
+        }
+    }
+
+    if (filter_name == "gammascaled")
+    {
+        float gamma = std::stof(filter_param);
+        for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
+        {
+            float v = data[i];
+
+            v /= std::numeric_limits<uint16_t>::max();
+            v = log(v);
+            v *= gamma;
+            v = exp(v);
+            v *= std::numeric_limits<uint16_t>::max();
+
+            v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
+            v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
+
+            data[i] = v;
+        }
+    }
+
+    if (filter_name == "scale")
+    {
+        float scale = std::stof(filter_param);
+        for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
+        {
+            float v = data[i];
+            v *= scale;
+
+            v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
+            v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
+
+            data[i] = v;
+        }
+    }
+
+    if (filter_name == "weiner")
+    {
+        float nv = std::stof(filter_param);
+
+        double a = 1.0 / (1.0 + nv);
+        double b = nv / (1.0 + nv);
+
+        for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
+        {
+            float v = data[i];
+
+            v *= a;
+            if (i > 0)
+            {
+                v += b * data[i - 1];
+            }
+
+            v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
+            v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
+
+            data[i] = v;
+        }
+    }
+
+    if (filter_name == "gaussian")
+    {
+        float sig = std::stof(filter_param);
+
+        float *data_tmp = (float *)calloc(data_size / sizeof(uint16_t), sizeof(float));
+
+        for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
+        {
+            float v = data[i];
+            data_tmp[i] = v;
+        }
+
+        size_t osizei = std::get<0>(data_shape);
+        size_t osizej = std::get<1>(data_shape);
+        size_t osizek = std::get<2>(data_shape);
+
+        for (size_t c = 0; c < channel_count; c++)
+        {
+            for (size_t i = 0; i < osizei; i++)
+            {
+                for (size_t j = 0; j < osizej; j++)
+                {
+                    for (size_t k = 0; k < osizek; k++)
+                    {
+                        const int window_size = 3;
+
+                        const int istart = ((int)i) - window_size;
+                        const int iend = ((int)i) + window_size;
+                        const int jstart = ((int)j) - window_size;
+                        const int jend = ((int)j) + window_size;
+                        const int kstart = ((int)k) - window_size;
+                        const int kend = ((int)k) + window_size;
+
+                        double sum = 1e-9;
+                        double n = 1e-9;
+
+                        for (int di = istart; di <= iend; di++)
+                        {
+                            for (int dj = jstart; dj <= jend; dj++)
+                            {
+                                for (int dk = kstart; dk <= kend; dk++)
+                                {
+                                    if (di < 0 || dj < 0 || dk < 0 || di >= osizei || dj >= osizej || dk >= osizek)
+                                    {
+                                        continue;
+                                    }
+
+                                    const size_t ioffset = (c * osizei * osizej * osizek) + // C
+                                                           (dk * osizei * osizej) +         // Z
+                                                           (dj * osizei) +                  // Y
+                                                           (di);                            // X
+
+                                    float dist = powf32(di - i, 2) + powf32(dj - j, 2) + powf32(dk - k, 2); // d^2
+                                    float coeff = exp(-0.5 * dist / powf32(sig, 2));                        // / (sig * sqrtf32(M_2_PI));
+
+                                    float toadd = data[ioffset];
+                                    toadd *= coeff;
+
+                                    sum += toadd;
+                                    n += coeff;
+                                }
+                            }
+                        }
+
+                        sum /= n;
+                        const size_t ooffset = (c * osizei * osizej * osizek) + // C
+                                               (k * osizei * osizej) +          // Z
+                                               (j * osizei) +                   // Y
+                                               (i);                             // X
+
+                        data_tmp[ooffset] = sum;
+                    }
+                }
+            }
+        }
+
+        for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
+        {
+            float v = data_tmp[i];
+
+            v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
+            v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
+
+            data[i] = v;
+        }
+
+        free(data_tmp);
+    }
+
+    if (filter_name == "clahe")
+    {
+        size_t sizex = std::get<0>(data_shape);
+        size_t sizey = std::get<1>(data_shape);
+        size_t sizez = std::get<2>(data_shape);
+
+        float param = std::stof(filter_param);
+
+        clahe_1d(data, data_size, param);
+    }
+}

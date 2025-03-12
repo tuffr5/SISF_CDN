@@ -88,187 +88,6 @@ void load_inventory()
 	std::cout << "|====================================================|" << std::endl;
 }
 
-void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, size_t> data_shape, size_t channel_count, std::string filter_name, std::string filter_param)
-{
-	if (filter_name == "offset")
-	{
-		float off = std::stof(filter_param);
-		for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
-		{
-			float v = data[i];
-			v += off;
-
-			v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
-			v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
-
-			data[i] = v;
-		}
-	}
-
-	if (filter_name == "gamma")
-	{
-		float gamma = std::stof(filter_param);
-		for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
-		{
-			float v = data[i];
-			v = pow(v, gamma);
-
-			v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
-			v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
-
-			data[i] = v;
-		}
-	}
-
-	if (filter_name == "gammascaled")
-	{
-		float gamma = std::stof(filter_param);
-		for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
-		{
-			float v = data[i];
-
-			v /= std::numeric_limits<uint16_t>::max();
-			v = log(v);
-			v *= gamma;
-			v = exp(v);
-			v *= std::numeric_limits<uint16_t>::max();
-
-			v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
-			v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
-
-			data[i] = v;
-		}
-	}
-
-	if (filter_name == "scale")
-	{
-		float scale = std::stof(filter_param);
-		for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
-		{
-			float v = data[i];
-			v *= scale;
-
-			v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
-			v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
-
-			data[i] = v;
-		}
-	}
-
-	if (filter_name == "weiner")
-	{
-		float nv = std::stof(filter_param);
-
-		double a = 1.0 / (1.0 + nv);
-		double b = nv / (1.0 + nv);
-
-		for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
-		{
-			float v = data[i];
-
-			v *= a;
-			if (i > 0)
-			{
-				v += b * data[i - 1];
-			}
-
-			v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
-			v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
-
-			data[i] = v;
-		}
-	}
-
-	if (filter_name == "gaussian")
-	{
-		float sig = std::stof(filter_param);
-
-		float *data_tmp = (float *)calloc(data_size / sizeof(uint16_t), sizeof(float));
-
-		for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
-		{
-			float v = data[i];
-			data_tmp[i] = v;
-		}
-
-		size_t osizei = std::get<0>(data_shape);
-		size_t osizej = std::get<1>(data_shape);
-		size_t osizek = std::get<2>(data_shape);
-
-		for (size_t c = 0; c < channel_count; c++)
-		{
-			for (size_t i = 0; i < osizei; i++)
-			{
-				for (size_t j = 0; j < osizej; j++)
-				{
-					for (size_t k = 0; k < osizek; k++)
-					{
-						const int window_size = 3;
-
-						const int istart = ((int)i) - window_size;
-						const int iend = ((int)i) + window_size;
-						const int jstart = ((int)j) - window_size;
-						const int jend = ((int)j) + window_size;
-						const int kstart = ((int)k) - window_size;
-						const int kend = ((int)k) + window_size;
-
-						double sum = 1e-9;
-						double n = 1e-9;
-
-						for (int di = istart; di <= iend; di++)
-						{
-							for (int dj = jstart; dj <= jend; dj++)
-							{
-								for (int dk = kstart; dk <= kend; dk++)
-								{
-									if (di < 0 || dj < 0 || dk < 0 || di >= osizei || dj >= osizej || dk >= osizek)
-									{
-										continue;
-									}
-
-									const size_t ioffset = (c * osizei * osizej * osizek) + // C
-														   (dk * osizei * osizej) +			// Z
-														   (dj * osizei) +					// Y
-														   (di);							// X
-
-									float dist = powf32(di - i, 2) + powf32(dj - j, 2) + powf32(dk - k, 2); // d^2
-									float coeff = exp(-0.5 * dist / powf32(sig, 2));						// / (sig * sqrtf32(M_2_PI));
-
-									float toadd = data[ioffset];
-									toadd *= coeff;
-
-									sum += toadd;
-									n += coeff;
-								}
-							}
-						}
-
-						sum /= n;
-						const size_t ooffset = (c * osizei * osizej * osizek) + // C
-											   (k * osizei * osizej) +			// Z
-											   (j * osizei) +					// Y
-											   (i);								// X
-
-						data_tmp[ooffset] = sum;
-					}
-				}
-			}
-		}
-
-		for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
-		{
-			float v = data_tmp[i];
-
-			v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
-			v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
-
-			data[i] = v;
-		}
-
-		free(data_tmp);
-	}
-}
-
 int main(int argc, char *argv[])
 {
 	{
@@ -500,6 +319,7 @@ int main(int argc, char *argv[])
 		auto archive_search = archive_inventory.find(data_id);
 
 		if(archive_search == archive_inventory.end()) {
+			res.code = crow::status::NOT_FOUND;
 			res.end("File not found.");
 			return;
 		}
@@ -549,6 +369,13 @@ int main(int argc, char *argv[])
 		res.write(response.dump());
     	res.end(); });
 
+	//	ENDPOINT: /data/<string>/provenance
+	CROW_ROUTE(app, "/<string>/provenance")
+	([](crow::response &res, std::string data_id_in)
+	 {
+		res.code = crow::status::NOT_FOUND;
+		res.end(); });
+
 	CROW_ROUTE(app, "/<string>/tracing/<string>/<string>")
 	([](const crow::request &req, crow::response &res, std::string data_id_in, std::string pt_in_s1, std::string pt_in_s2)
 	 {
@@ -570,6 +397,7 @@ int main(int argc, char *argv[])
 
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
+			res.code = crow::status::NOT_FOUND;
 			res.end("File not found.");
 			return;
 		}
