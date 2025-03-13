@@ -1474,12 +1474,214 @@ int main(int argc, char *argv[])
 		//uint16_t out_buffer[handler->channel_count][chunk_sizes[2]][chunk_sizes[1]][chunk_sizes[0]];
 		const size_t out_buffer_size = sizeof(uint16_t) * chunk_sizes[0] * chunk_sizes[1] * chunk_sizes[2] * reader->channel_count;
 
-		uint16_t * out_buffer = reader->load_region(
-			scale,
-			x_begin, x_end,
-			y_begin, y_end,
-			z_begin, z_end
-		);
+		enum projectfunction
+		{
+			max_project,
+			min_project,
+			avg_project
+		};
+
+		int64_t project_frames = -1; // Number of frames to max project
+		char project_axis = 0;		 // Axis to max project along
+		projectfunction project_mode = max_project; // What projection function to use
+
+		// Check for project parameters in filters list
+		for (const auto &pair : filters)
+		{
+			if (pair.second.empty())
+			{
+				continue;
+			}
+			if (pair.first == "project")
+			{
+				project_frames = std::stoi(pair.second);
+			}
+			else if (pair.first == "project_axis")
+			{
+				project_axis = pair.second.at(0);
+			}
+			else if (pair.first == "project_function")
+			{
+				if (pair.second == "max")
+				{
+					project_mode = max_project;
+				}
+				else if (pair.second == "min")
+				{
+					project_mode = min_project;
+				}
+				else if (pair.second == "avg")
+				{
+					project_mode = avg_project;
+				}
+			}
+		}
+
+		uint16_t * out_buffer;
+
+		// Scale frame count by downsampling
+		if(project_frames > 1) {
+			if(project_axis == 0) {
+				if(chunk_sizes[0] == 1) {
+					project_axis = 'x';
+				} else if (chunk_sizes[1] == 1) {
+					project_axis = 'y';
+				} else { //if (chunk_sizes[2] == 1) {
+					project_axis = 'z';
+				}
+			}
+
+			project_frames /= scale;
+			if(project_frames < 1) {
+				project_frames = 1;
+			}
+		}
+
+		if(project_frames > 1) {
+			out_buffer = (uint16_t *) calloc(out_buffer_size, 1);
+
+			switch(project_axis) {
+				case 'x':
+				case 'y':
+				case 'z':
+					break;
+				default:
+					project_axis = 'z';
+			}
+
+			size_t x_begin_project = x_begin;
+			size_t y_begin_project = y_begin;
+			size_t z_begin_project = z_begin;
+
+			size_t x_end_project = x_end;
+			size_t y_end_project = y_end;
+			size_t z_end_project = z_end;
+
+			std::tuple<size_t, size_t, size_t> dataset_size = reader->get_size(scale);
+
+			const size_t sizex = std::get<0>(dataset_size);
+			const size_t sizey = std::get<1>(dataset_size);
+			const size_t sizez = std::get<2>(dataset_size);
+
+			switch (project_axis)
+			{
+			case 'x':
+				x_end_project += project_frames;
+				x_end_project = std::min(sizex, x_end_project);
+				break;
+			case 'y':
+				y_end_project += project_frames;
+				y_end_project = std::min(sizey, y_end_project);
+				break;
+			case 'z':
+				z_end_project += project_frames;
+				z_end_project = std::min(sizez, z_end_project);
+				break;
+			}
+
+			const size_t x_project_size = x_end_project - x_begin_project;
+			const size_t y_project_size = y_end_project - y_begin_project;
+			const size_t z_project_size = z_end_project - z_begin_project;
+
+			uint16_t * tmp_buffer = reader->load_region(
+				scale,
+				x_begin_project, x_end_project,
+				y_begin_project, y_end_project,
+				z_begin_project, z_end_project
+			);
+
+			uint16_t vout;
+			double sum;
+			for (size_t c = 0; c < reader->channel_count; c++)
+			{
+				for (size_t k = 0; k < chunk_sizes[2]; k++)
+				{
+					for (size_t j = 0; j < chunk_sizes[1]; j++)
+					{
+						for (size_t i = 0; i < chunk_sizes[0]; i++)
+						{
+							switch (project_mode)
+							{
+							case max_project:
+								vout = std::numeric_limits<uint16_t>::min();
+								break;
+							case min_project:
+								vout = std::numeric_limits<uint16_t>::max();
+								break;
+							case avg_project:
+								vout = 0;
+								sum = 0.0;
+								break;
+							}
+
+							for (size_t p = 0; p < project_frames; p++)
+							{
+								size_t new_i = i;
+								size_t new_j = j;
+								size_t new_k = k;
+
+								switch (project_axis)
+								{
+								case 'x':
+									new_i = std::min(x_project_size - 1, new_i + p);
+									break;
+								case 'y':
+									new_j = std::min(y_project_size - 1, new_j + p);
+									break;
+								case 'z':
+									new_k = std::min(z_project_size - 1, new_k + p);
+									break;
+								}
+
+								const size_t ioffset = (c * x_project_size * y_project_size * z_project_size) + // C
+													   (new_k * x_project_size * y_project_size) +				// Z
+													   (new_j * x_project_size) +								// Y
+													   (new_i);													// X
+
+								const uint16_t vin = tmp_buffer[ioffset];
+
+								switch (project_mode)
+								{
+								case max_project:
+									vout = std::max(vin, vout);
+									break;
+								case min_project:
+									vout = std::min(vin, vout);
+									break;
+								case avg_project:
+									vout++;
+									sum += vin;
+									break;
+								}
+							}
+
+							if (project_mode == avg_project)
+							{
+								sum /= vout;
+								vout = sum;
+							}
+
+							const size_t ooffset = (c * chunk_sizes[0] * chunk_sizes[1] * chunk_sizes[2]) + // C
+												   (k * chunk_sizes[0] * chunk_sizes[1]) +					// Z
+												   (j * chunk_sizes[0]) +									// Y
+												   (i);														// X
+
+							out_buffer[ooffset] = vout;
+						}
+					}
+				}
+			}
+
+			free(tmp_buffer);
+		} else {
+			// Load unprojected data
+			out_buffer = reader->load_region(
+				scale,
+				x_begin, x_end,
+				y_begin, y_end,
+				z_begin, z_end
+			);
+		}
 
 		for(const auto& pair : filters) {
 			filter_run(
