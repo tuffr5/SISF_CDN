@@ -156,7 +156,7 @@ void clahe_1d(uint16_t *image, size_t data_size, uint32_t clipLimit)
 
         bin = std::min(bin, bins - 1);
         bin = std::max(0, bin);
-        
+
         hist[bin] += 1.0;
     }
 
@@ -181,7 +181,8 @@ void clahe_1d(uint16_t *image, size_t data_size, uint32_t clipLimit)
 
     // 0 .. 1
     double sum = 0.0;
-    for(size_t i = 0; i < bins; i++) {
+    for (size_t i = 0; i < bins; i++)
+    {
         hist[i] /= pixel_cnt;
 
         sum += hist[i];

@@ -37,7 +37,7 @@ bool READ_ONLY_MODE = false;
 
 std::string DATA_PATH = "./data/";
 std::string SERVER_ROOT = "https://server/";
-const std::string VERSION_STRING = "V0-6-0";
+const std::string VERSION_STRING = "V0-6-3";
 
 using json = nlohmann::json;
 
@@ -45,27 +45,10 @@ typedef std::tuple<float, float, float, float, int> swc_line;
 typedef std::tuple<int, float, float, float, float, int> swc_line_input;
 
 std::unordered_map<std::string, archive_reader *> archive_inventory;
+
 void load_inventory()
 {
 	std::cout << "|================AVAILABLE DATASETS==================|" << std::endl;
-
-	{
-		std::vector<std::string> fnames = glob_tool(std::string(DATA_PATH + "*/metadata.bin"));
-		for (std::vector<std::string>::iterator i = fnames.begin(); i != fnames.end(); i++)
-		{
-			size_t loc = i->find_last_of("/");
-
-			std::string froot = std::string(i->c_str(), i->c_str() + loc);
-
-			loc = froot.find_last_of('/');
-			std::string dset_name = froot.substr(loc + 1);
-
-			archive_inventory[dset_name] = new archive_reader(froot, SISF);
-
-			std::cout << "[SISF] ";
-			archive_inventory[dset_name]->print_info();
-		}
-	}
 
 	{
 		std::vector<std::string> fnames = glob_tool(std::string(DATA_PATH + "*/zarr.json"));
@@ -78,14 +61,80 @@ void load_inventory()
 			loc = froot.find_last_of('/');
 			std::string dset_name = froot.substr(loc + 1);
 
-			archive_inventory[dset_name] = new archive_reader(froot, ZARR);
+			try
+			{
+				archive_inventory[dset_name] = new archive_reader(froot, ZARR, false);
+				std::cout << "[ZARR] ";
+				archive_inventory[dset_name]->print_info();
+			}
+			catch (...)
+			{
+				std::cout << "[FAIL] " << dset_name << std::endl;
+			}
+		}
+	}
 
-			std::cout << "[ZARR] ";
-			archive_inventory[dset_name]->print_info();
+	{
+		std::vector<std::string> fnames = glob_tool(std::string(DATA_PATH + "*/metadata.bin"));
+		for (std::vector<std::string>::iterator i = fnames.begin(); i != fnames.end(); i++)
+		{
+			size_t loc = i->find_last_of("/");
+
+			std::string froot = std::string(i->c_str(), i->c_str() + loc);
+
+			loc = froot.find_last_of('/');
+			std::string dset_name = froot.substr(loc + 1);
+
+			try
+			{
+				archive_inventory[dset_name] = new archive_reader(froot, SISF, false);
+				std::cout << "[SISF] ";
+				archive_inventory[dset_name]->print_info();
+			}
+			catch (...)
+			{
+				std::cout << "[FAIL] " << dset_name << std::endl;
+			}
+		}
+	}
+
+	{
+		std::vector<std::string> fnames = glob_tool(std::string(DATA_PATH + "*/metadata.json"));
+		for (std::vector<std::string>::iterator i = fnames.begin(); i != fnames.end(); i++)
+		{
+			size_t loc = i->find_last_of("/");
+
+			std::string froot = std::string(i->c_str(), i->c_str() + loc);
+
+			loc = froot.find_last_of('/');
+			std::string dset_name = froot.substr(loc + 1);
+
+			try
+			{
+				archive_inventory[dset_name] = new archive_reader(froot, SISF, true);
+				std::cout << "[SISF-JSON] ";
+				archive_inventory[dset_name]->print_info();
+			}
+			catch (...)
+			{
+				std::cout << "[FAIL] " << dset_name << std::endl;
+			}
 		}
 	}
 
 	std::cout << "|====================================================|" << std::endl;
+}
+
+archive_reader *search_inventory(std::string key)
+{
+	auto archive_search = archive_inventory.find(key);
+
+	if (archive_search == archive_inventory.end())
+	{
+		return nullptr;
+	}
+
+	return archive_search->second;
 }
 
 int main(int argc, char *argv[])
@@ -130,6 +179,10 @@ int main(int argc, char *argv[])
 	CROW_ROUTE(app, "/")
 	([]()
 	 { return "Server is up!"; });
+
+	CROW_ROUTE(app, "/version")
+	([]()
+	 { return VERSION_STRING; });
 
 	CROW_ROUTE(app, "/debug_headers")
 	(
@@ -315,16 +368,13 @@ int main(int argc, char *argv[])
 	 {
 		//std::string, std::vector<std::pair<std::string, std::string>>
 		auto [data_id, filters] = parse_filter_list(data_id_in);
+		archive_reader * reader = search_inventory(data_id);
 
-		auto archive_search = archive_inventory.find(data_id);
-
-		if(archive_search == archive_inventory.end()) {
+		if(reader == nullptr) {
 			res.code = crow::status::NOT_FOUND;
-			res.end("File not found.");
+			res.end("404 Not Found\n");
 			return;
 		}
-
-		archive_reader * reader = archive_search->second;
 
 		std::vector<json> scales;
 		for(size_t scale : reader->scales) {
@@ -369,7 +419,6 @@ int main(int argc, char *argv[])
 		res.write(response.dump());
     	res.end(); });
 
-	//	ENDPOINT: /data/<string>/provenance
 	CROW_ROUTE(app, "/<string>/provenance")
 	([](crow::response &res, std::string data_id_in)
 	 {
@@ -382,6 +431,7 @@ int main(int argc, char *argv[])
 		auto soma_param = req.url_params.get("is_soma");
 		bool is_soma = soma_param != nullptr && strcmp(soma_param, "true") == 0;
 		std::cout << "is_soma=" << is_soma << std::endl;
+
 		int pt1[3], pt2[3];
 		if(sscanf(pt_in_s1.c_str(), "%d,%d,%d", &pt1[0], &pt1[1], &pt1[2]) != 3) {
 			res.end("Invalid point descriptor " + pt_in_s1);
@@ -392,16 +442,16 @@ int main(int argc, char *argv[])
 			return;
 		}
 
-		//std::string, std::vector<std::pair<std::string, std::string>>
+		// std::string, std::vector<std::pair<std::string, std::string>>
 		auto [data_id, filters] = parse_filter_list(data_id_in);
+		archive_reader *reader = search_inventory(data_id);
 
-		auto archive_search = archive_inventory.find(data_id);
-		if(archive_search == archive_inventory.end()) {
+		if (reader == nullptr)
+		{
 			res.code = crow::status::NOT_FOUND;
-			res.end("File not found.");
+			res.end("404 Not Found\n");
 			return;
 		}
-		archive_reader * reader = archive_search->second;
 
 		if(pt1[0] < 0 || pt1[1] < 0 || pt1[2] < 0 || pt1[0] >= reader->sizex || pt1[1] >= reader->sizey || pt1[2] >= reader->sizez) {
 			res.code = crow::status::BAD_REQUEST;
@@ -504,8 +554,6 @@ int main(int argc, char *argv[])
 			if(*target == *end) {
 				break;
 			}
-
-
 
 			for(auto step : (is_soma ? neighbor_steps_no_z : neighbor_steps)) {
 				const int dx = std::get<0>(step);
@@ -634,13 +682,13 @@ int main(int argc, char *argv[])
 	 {
 		//std::string, std::vector<std::pair<std::string, std::string>>
 		auto [data_id, filters] = parse_filter_list(data_id_in);
-			
-		auto archive_search = archive_inventory.find(data_id);
-		if(archive_search == archive_inventory.end()) {
-			res.end("File not found.");
+		archive_reader * reader = search_inventory(data_id);
+
+		if(reader == nullptr) {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found\n");
 			return;
 		}
-		archive_reader * reader = archive_search->second;
 
 		float pt_in_f[3];
 		sscanf(pt_in_s.c_str(), "%f,%f,%f", &pt_in_f[0], &pt_in_f[1], &pt_in_f[2]);
@@ -745,12 +793,15 @@ int main(int argc, char *argv[])
 		res.end(); });
 
 	CROW_ROUTE(app, "/<string>/skeleton/info")
-	([](crow::response &res, std::string data_id)
+	([](crow::response &res, std::string data_id_in)
 	 {
-		data_id = str_first(data_id, '+');
-		auto archive_search = archive_inventory.find(data_id);
-		if(archive_search == archive_inventory.end()) {
-			res.end();
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
+		archive_reader * reader = search_inventory(data_id);
+
+		if(reader == nullptr) {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found\n");
 			return;
 		}
 
@@ -1227,23 +1278,25 @@ int main(int argc, char *argv[])
 	 {
 		//std::string, std::vector<std::pair<std::string, std::string>>
 		auto [data_id, filters] = parse_filter_list(data_id_in);
+		archive_reader * reader = search_inventory(data_id);
 
-		auto archive_search = archive_inventory.find(data_id);
-
-		if(archive_search == archive_inventory.end()) {
-			res.end("File not found.");
+		if(reader == nullptr) {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found\n");
 			return;
 		}
 
 		unsigned int channel, chunk_i, chunk_j, chunk_k;
-		sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &chunk_i, &chunk_j, &chunk_k);
-
-		archive_reader * reader = archive_search->second;
+		if(sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &chunk_i, &chunk_j, &chunk_k) != 4) {
+			res.code = crow::status::BAD_REQUEST;
+			res.end("Bad Request -- invalid chunk identifier");
+			return;
+		};
 
 		if (channel >= reader->channel_count || chunk_i >= reader->mcountx || chunk_j >= reader->mcounty || chunk_k >= reader->mcountz)
 		{
-			res.code = 400;
-			res.end();
+			res.code = crow::status::BAD_REQUEST;
+			res.end("Bad Request -- chunk out of range");
 			return;
 		}
 
@@ -1309,14 +1362,13 @@ int main(int argc, char *argv[])
 	 {
 		//std::string, std::vector<std::pair<std::string, std::string>>
 		auto [data_id, filters] = parse_filter_list(data_id_in);
+		archive_reader * reader = search_inventory(data_id);
 
-		auto archive_search = archive_inventory.find(data_id);
-		if(archive_search == archive_inventory.end()) {
-			res.end();
+		if(reader == nullptr) {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found\n");
 			return;
 		}
-
-		archive_reader * reader = archive_search->second;
 
 		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
 		// <xBegin>-<xEnd>_<yBegin>-<yEnd>_<zBegin>-<zEnd>
@@ -1324,14 +1376,18 @@ int main(int argc, char *argv[])
 
 		size_t chunk_sizes[3] = {x_end - x_begin, y_end - y_begin, z_end - z_begin};
 		size_t scale = stoi(resolution_id);
-		
+
 		unsigned int channel, chunk_i, chunk_j, chunk_k;
-		sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &chunk_i, &chunk_j, &chunk_k);
+		if(sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &chunk_i, &chunk_j, &chunk_k) != 4) {
+			res.code = crow::status::BAD_REQUEST;
+			res.end("Bad Request -- invalid chunk identifier");
+			return;
+		};
 
 		if (channel >= reader->channel_count || chunk_i >= reader->mcountx || chunk_j >= reader->mcounty || chunk_k >= reader->mcountz)
 		{
-			res.code = 400;
-			res.end();
+			res.code = crow::status::BAD_REQUEST;
+			res.end("Bad Request -- chunk out of range");
 			return;
 		}
 
@@ -1444,27 +1500,74 @@ int main(int argc, char *argv[])
 		
 		//std::string, std::vector<std::pair<std::string, std::string>>
 		auto [data_id, filters] = parse_filter_list(data_id_in);
+		archive_reader * reader = search_inventory(data_id);
 
-		auto archive_search = archive_inventory.find(data_id);
-		if(archive_search == archive_inventory.end()) {
-			res.end();
+		if(reader == nullptr) {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found\n");
 			return;
 		}
 
-		archive_reader * reader = archive_search->second;
-
 		if(!reader->verify_protection(filters)) {
 			res.code = crow::status::FORBIDDEN;
-			res.end();
+			res.end("403 Forbidden\n");
 			return;
 		}
 
 		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
 		// <xBegin>-<xEnd>_<yBegin>-<yEnd>_<zBegin>-<zEnd>
-		sscanf(tile_key.c_str(), "%u-%u_%u-%u_%u-%u", &x_begin, &x_end, &y_begin, &y_end, &z_begin, &z_end);
+		if (sscanf(tile_key.c_str(), "%u-%u_%u-%u_%u-%u", &x_begin, &x_end, &y_begin, &y_end, &z_begin, &z_end) != 6)
+		{
+			res.code = crow::status::BAD_REQUEST;
+			res.end("400 Bad Request -- Invalid range string\n");
+			return;
+		}
 
+		size_t scale;
+		try
+		{
+			scale = std::stoi(resolution_id);
+		}
+		catch (const std::invalid_argument &e)
+		{
+			scale = 0;
+		}
+		catch (const std::out_of_range &e)
+		{
+			scale = 0;
+		}
+
+		if (scale == 0)
+		{
+			res.code = crow::status::BAD_REQUEST;
+			res.end("400 Bad Request -- Invalid scale string\n");
+			return;
+		}
+
+		//size_t scale = stoi(resolution_id);
 		size_t chunk_sizes[3] = {x_end - x_begin, y_end - y_begin, z_end - z_begin};
-		size_t scale = stoi(resolution_id);
+		std::tuple<size_t, size_t, size_t> image_size = reader->get_size(scale);
+
+		{
+			bool out_of_range = false;
+			if (!reader->contains_scale(scale))
+			{
+				out_of_range = true;
+			}
+			else
+			{
+				out_of_range |= x_end > std::get<0>(image_size);
+				out_of_range |= y_end > std::get<1>(image_size);
+				out_of_range |= z_end > std::get<2>(image_size);
+			}
+
+			if (out_of_range)
+			{
+				res.code = crow::status::BAD_REQUEST;
+				res.end("400 Bad Request -- Invalid data range\n");
+				return;
+			}
+		}
 
 		// Create the output buffer
 		// The subvolume data for the chunk is stored directly in little-endian binary format in [x, y, z, channel]
@@ -1517,9 +1620,6 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		uint16_t * out_buffer;
-
-		// Scale frame count by downsampling
 		if(project_frames > 1) {
 			if(project_axis == 0) {
 				if(chunk_sizes[0] == 1) {
@@ -1531,11 +1631,14 @@ int main(int argc, char *argv[])
 				}
 			}
 
+			// Scale frame count by downsampling
 			project_frames /= scale;
 			if(project_frames < 1) {
 				project_frames = 1;
 			}
 		}
+
+		uint16_t * out_buffer;
 
 		if(project_frames > 1) {
 			out_buffer = (uint16_t *) calloc(out_buffer_size, 1);
