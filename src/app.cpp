@@ -7,6 +7,8 @@
 
 // #include "hdf5_reader.hpp"
 #include "sqlite_tools.hpp"
+#include "directory_watcher.hpp"
+#include <mutex>
 
 #include <string.h>
 #include <stdio.h>
@@ -43,6 +45,8 @@ typedef std::tuple<float, float, float, float, int> swc_line;
 typedef std::tuple<int, float, float, float, float, int> swc_line_input;
 
 std::unordered_map<std::string, archive_reader *> archive_inventory;
+std::mutex archive_inventory_mutex;
+
 void load_inventory()
 {
 	std::cout << "|================AVAILABLE DATASETS==================|" << std::endl;
@@ -85,6 +89,18 @@ void load_inventory()
 
 	std::cout << "|====================================================|" << std::endl;
 }
+
+void reload_inventory_safe() {
+    std::lock_guard<std::mutex> lock(archive_inventory_mutex);
+    
+    for (auto& pair : archive_inventory) {
+        delete pair.second;
+    }
+    archive_inventory.clear();
+    
+    load_inventory();
+}
+
 
 void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, size_t> data_shape, size_t channel_count, std::string filter_name, std::string filter_param)
 {
@@ -352,6 +368,7 @@ int main(int argc, char *argv[])
 		tc >> THREAD_COUNT;
 	}
 
+	efsw::FileWatcher* fileWatcher = initializeDirectoryWatcher(DATA_PATH, reload_inventory_safe);
 	load_inventory();
 
 	// Create App with CORS enabled
@@ -475,6 +492,7 @@ int main(int argc, char *argv[])
 
 		std::vector<std::string> sample_names;
 		std::map<std::string, std::string> sample_table;
+		std::lock_guard<std::mutex> lock(archive_inventory_mutex);
 		sample_names.reserve(archive_inventory.size());
 
 		for ( const auto &kvpair : archive_inventory ) {
@@ -529,6 +547,7 @@ int main(int argc, char *argv[])
 	([](crow::response &res, std::string data_id)
 	 {
 		data_id = str_first(data_id, '+');
+		std::lock_guard<std::mutex> lock(archive_inventory_mutex);
 		auto archive_search = archive_inventory.find(data_id);
 
 		if(archive_search == archive_inventory.end()) {
@@ -590,6 +609,7 @@ int main(int argc, char *argv[])
 	([](crow::response &res, std::string data_id, int num_zslices)
 	 {
 			data_id = str_first(data_id, '+');
+			std::lock_guard<std::mutex> lock(archive_inventory_mutex);
 			auto archive_search = archive_inventory.find(data_id);
 	
 			if(archive_search == archive_inventory.end()) {
@@ -665,7 +685,7 @@ int main(int argc, char *argv[])
 		}
 
 		data_id = str_first(data_id, '+');
-
+		std::lock_guard<std::mutex> lock(archive_inventory_mutex);
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
 			res.end("File not found.");
@@ -903,7 +923,7 @@ int main(int argc, char *argv[])
 	([](crow::response &res, std::string data_id, std::string pt_in_s)
 	 {
 		data_id = str_first(data_id, '+');
-			
+		std::lock_guard<std::mutex> lock(archive_inventory_mutex);
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
 			res.end("File not found.");
@@ -1017,6 +1037,7 @@ int main(int argc, char *argv[])
 	([](crow::response &res, std::string data_id)
 	 {
 		data_id = str_first(data_id, '+');
+		std::lock_guard<std::mutex> lock(archive_inventory_mutex);
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
 			res.end();
@@ -1657,6 +1678,7 @@ int main(int argc, char *argv[])
 	([](crow::response &res, std::string data_id, std::string chunk_key)
 	 {
 		data_id = str_first(data_id, '+');
+		std::lock_guard<std::mutex> lock(archive_inventory_mutex);
 		auto archive_search = archive_inventory.find(data_id);
 
 		if(archive_search == archive_inventory.end()) {
@@ -1760,6 +1782,7 @@ int main(int argc, char *argv[])
     	//}
 
 		data_id = data_id_parts[0];
+		std::lock_guard<std::mutex> lock(archive_inventory_mutex);
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
 			res.end();
@@ -1906,6 +1929,7 @@ int main(int argc, char *argv[])
 		}
 	
 		data_id = data_id_parts[0];
+		std::lock_guard<std::mutex> lock(archive_inventory_mutex);
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
 			res.end();
@@ -2176,6 +2200,7 @@ int main(int argc, char *argv[])
     	//}
 
 		data_id = data_id_parts[0];
+		std::lock_guard<std::mutex> lock(archive_inventory_mutex);
 		auto archive_search = archive_inventory.find(data_id);
 		if(archive_search == archive_inventory.end()) {
 			res.end();
@@ -2237,4 +2262,5 @@ int main(int argc, char *argv[])
 			.timeout(5)
 			.run();
 	}
+
 }
