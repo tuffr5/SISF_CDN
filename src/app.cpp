@@ -37,7 +37,7 @@ bool READ_ONLY_MODE = false;
 
 std::string DATA_PATH = "./data/";
 std::string SERVER_ROOT = "https://server/";
-const std::string VERSION_STRING = "V0-6-3";
+const std::string VERSION_STRING = "V0.6.4";
 
 using json = nlohmann::json;
 
@@ -63,7 +63,7 @@ void load_inventory()
 
 			try
 			{
-				archive_inventory[dset_name] = new archive_reader(froot, ZARR, false);
+				archive_inventory[dset_name] = new archive_reader(froot, ZARR);
 				std::cout << "[ZARR] ";
 				archive_inventory[dset_name]->print_info();
 			}
@@ -87,7 +87,7 @@ void load_inventory()
 
 			try
 			{
-				archive_inventory[dset_name] = new archive_reader(froot, SISF, false);
+				archive_inventory[dset_name] = new archive_reader(froot, SISF);
 				std::cout << "[SISF] ";
 				archive_inventory[dset_name]->print_info();
 			}
@@ -111,8 +111,39 @@ void load_inventory()
 
 			try
 			{
-				archive_inventory[dset_name] = new archive_reader(froot, SISF, true);
+				archive_inventory[dset_name] = new archive_reader(froot, SISF_JSON);
 				std::cout << "[SISF-JSON] ";
+				archive_inventory[dset_name]->print_info();
+			}
+			catch (...)
+			{
+				std::cout << "[FAIL] " << dset_name << std::endl;
+			}
+		}
+	}
+
+	{
+		std::vector<std::string> fnames = glob_tool(std::string(DATA_PATH + "*/descriptor.json"));
+		for (std::vector<std::string>::iterator i = fnames.begin(); i != fnames.end(); i++)
+		{
+			size_t loc = i->find_last_of("/");
+
+			std::string froot = std::string(i->c_str(), i->c_str() + loc);
+
+			loc = froot.find_last_of('/');
+			std::string dset_name = froot.substr(loc + 1);
+
+			// We do not allow duplicate dataset names
+			if (archive_inventory.count(dset_name) != 0)
+			{
+				std::cout << "[FAIL] Duplicate: " << dset_name << std::endl;
+				continue;
+			}
+
+			try
+			{
+				archive_inventory[dset_name] = new archive_reader(froot, DESCRIPTOR, &archive_inventory);
+				std::cout << "[DESCRIPTOR] ";
 				archive_inventory[dset_name]->print_info();
 			}
 			catch (...)
@@ -1360,6 +1391,8 @@ int main(int argc, char *argv[])
 	CROW_ROUTE(app, "/<string>/raw_access/<string>/<string>/<string>")
 	([](crow::response &res, std::string data_id_in, std::string chunk_key, std::string resolution_id, std::string tile_key)
 	 {
+		auto begin = now();
+
 		//std::string, std::vector<std::pair<std::string, std::string>>
 		auto [data_id, filters] = parse_filter_list(data_id_in);
 		archive_reader * reader = search_inventory(data_id);
@@ -1489,7 +1522,9 @@ int main(int argc, char *argv[])
 		res.body = std::string((char *) out_buffer, out_buffer_size);
 		free(out_buffer);
 
-		res.end(); });
+		res.end(); 
+	
+		log_time(data_id, "READ_RAW", scale, x_end-x_begin, y_end-y_begin, z_end-z_begin, begin); });
 
 	// @app.route("/data/<data_id>/<resolution>/<key>-<key>-<key>")
 	// This has to be last in the route list because it acts as a wildcard

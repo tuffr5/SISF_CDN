@@ -72,8 +72,10 @@ struct global_chunk_line
 
 enum ArchiveType
 {
+    SISF_JSON,
     SISF,
-    ZARR
+    ZARR,
+    DESCRIPTOR
 };
 
 using json = nlohmann::json;
@@ -428,6 +430,35 @@ public:
     }
 };
 
+class descriptor_layer
+{
+public:
+    std::string source_name;
+    uint16_t source_channel = 0;
+    uint16_t target_channel = 0;
+
+    size_t sizex = 0;
+    size_t sizey = 0;
+    size_t sizez = 0;
+
+    // TODO, not currently used
+    int64_t ioffsetx = 0;
+    int64_t ioffsety = 0;
+    int64_t ioffsetz = 0;
+
+    int64_t ooffsetx = 0;
+    int64_t ooffsety = 0;
+    int64_t ooffsetz = 0;
+
+    bool invertx = false;
+    bool inverty = false;
+    bool invertz = false;
+
+    descriptor_layer()
+    {
+    }
+};
+
 class archive_reader
 {
 public:
@@ -445,13 +476,29 @@ public:
 
     std::vector<size_t> scales;
 
+    std::vector<descriptor_layer *> descriptor_layers;
+    std::map<uint16_t, uint16_t> descriptor_channel_map;
+    int64_t descriptor_x_origin;
+    int64_t descriptor_y_origin;
+    int64_t descriptor_z_origin;
+
     ArchiveType type;
 
-    archive_reader(std::string name_in, enum ArchiveType type_in, bool use_json_metdata = false)
+    std::unordered_map<std::string, archive_reader *> *parent_archive_inventory;
+
+    archive_reader(std::string name_in, enum ArchiveType type_in, std::unordered_map<std::string, archive_reader *> *par_in = nullptr)
     {
         fname = name_in;
         type = type_in;
-        metadata_json = use_json_metdata;
+        parent_archive_inventory = par_in;
+
+        metadata_json = false;
+        if (type == SISF_JSON)
+        {
+            // SISF_JSON is parsed the same other than metadata, set flag and type
+            metadata_json = true;
+            type = SISF;
+        }
 
         switch (type)
         {
@@ -460,6 +507,9 @@ public:
             break;
         case ZARR:
             load_metadata_zarr();
+            break;
+        case DESCRIPTOR:
+            load_metadata_descriptor();
             break;
         }
 
@@ -713,6 +763,168 @@ public:
         }
 
         std::sort(scales.begin(), scales.end());
+    }
+
+    void load_metadata_descriptor()
+    {
+        std::ifstream inputFile(fname + "/descriptor.json");
+        if (!inputFile)
+        {
+            ; // TODO error handling
+        }
+
+        json jsonData;
+        inputFile >> jsonData; // Read JSON data from file
+
+        scales.push_back(1);
+
+        mcountx = 0;
+        mcounty = 0;
+        mcountz = 0;
+
+        mchunkx = 0;
+        mchunky = 0;
+        mchunkz = 0;
+
+        archive_version = 2;
+        dtype = 1;
+
+        resx = jsonData["xres"];
+        resy = jsonData["yres"];
+        resz = jsonData["zres"];
+
+        json layers = jsonData["layers"];
+
+        channel_count = 0;
+        if (layers.is_array())
+        {
+            for (const auto &element : layers)
+            {
+                descriptor_layer *layer = new descriptor_layer();
+
+                layer->source_name = element["source"];
+                layer->source_channel = element["source_channel"];
+                layer->target_channel = element["target_channel"];
+
+                json source_size = element["source_size"];
+                if (source_size.is_array())
+                {
+                    size_t i = 0;
+
+                    for (const auto &a : source_size)
+                    {
+                        int s = a.get<int>();
+
+                        switch (i)
+                        {
+                        case 0:
+                            layer->sizex = s;
+                            break;
+                        case 1:
+                            layer->sizey = s;
+                            break;
+                        case 2:
+                            layer->sizez = s;
+                            break;
+                        default:
+                            break;
+                        }
+
+                        i++;
+                    }
+
+                    if (i != 3)
+                    {
+                        throw std::runtime_error("invalid source_size size");
+                    }
+                }
+                else
+                {
+                    throw std::runtime_error("source_size should be an array");
+                }
+
+                json out_size = element["target_offset"];
+                if (out_size.is_array())
+                {
+                    size_t i = 0;
+
+                    for (const auto &a : out_size)
+                    {
+                        int s = a.get<int>();
+
+                        switch (i)
+                        {
+                        case 0:
+                            layer->ooffsetx = s;
+                            break;
+                        case 1:
+                            layer->ooffsety = s;
+                            break;
+                        case 2:
+                            layer->ooffsetz = s;
+                            break;
+                        default:
+                            break;
+                        }
+
+                        i++;
+                    }
+
+                    if (i != 3)
+                    {
+                        throw std::runtime_error("invalid out_size size");
+                    }
+                }
+                else
+                {
+                    throw std::runtime_error("out_size should be an array");
+                }
+
+                descriptor_layers.push_back(layer);
+            }
+        }
+        else
+        {
+            throw std::runtime_error("layer is not an array");
+        }
+
+        int64_t minx = 0; // std::numeric_limits<int64_t>::max();
+        int64_t maxx = std::numeric_limits<int64_t>::min();
+
+        int64_t miny = 0; // std::numeric_limits<int64_t>::max();
+        int64_t maxy = std::numeric_limits<int64_t>::min();
+
+        int64_t minz = 0; // std::numeric_limits<int64_t>::max();
+        int64_t maxz = std::numeric_limits<int64_t>::min();
+
+        std::set<uint16_t> found_channels;
+        for (descriptor_layer *l : descriptor_layers)
+        {
+            uint16_t tc = l->target_channel;
+            found_channels.insert(tc);
+            if (descriptor_channel_map.count(tc) == 0)
+            {
+                descriptor_channel_map[tc] = found_channels.size() - 1;
+            }
+
+            minx = std::min(minx, l->ooffsetx);
+            miny = std::min(miny, l->ooffsety);
+            minz = std::min(minz, l->ooffsetz);
+
+            maxx = std::max(maxx, static_cast<int64_t>(l->sizex) + l->ooffsetx);
+            maxy = std::max(maxy, static_cast<int64_t>(l->sizey) + l->ooffsety);
+            maxz = std::max(maxz, static_cast<int64_t>(l->sizez) + l->ooffsetz);
+        }
+
+        sizex = maxx - minx;
+        sizey = maxy - miny;
+        sizez = maxz - minz;
+
+        descriptor_x_origin = minx;
+        descriptor_y_origin = miny;
+        descriptor_z_origin = minz;
+
+        channel_count = found_channels.size();
     }
 
     std::tuple<size_t, size_t, size_t> get_size(size_t scale)
@@ -1044,6 +1256,97 @@ public:
                 }
             }
         }
+        else if (type == DESCRIPTOR && parent_archive_inventory != nullptr)
+        {
+            for (descriptor_layer *l : descriptor_layers)
+            {
+                // Find the beginning and end of this layer's output, measured relative to the origin (i.e. should never be less than zero)
+                const int64_t layer_start_x = l->ooffsetx - descriptor_x_origin;
+                const int64_t layer_end_x = layer_start_x + l->sizex;
+                const int64_t layer_start_y = l->ooffsety - descriptor_y_origin;
+                const int64_t layer_end_y = layer_start_y + l->sizey;
+                const int64_t layer_start_z = l->ooffsetz - descriptor_y_origin;
+                const int64_t layer_end_z = layer_start_z + l->sizez;
+
+                // Calculate the overlap start-stops, in output space
+                const int64_t x_overlap_start = std::max(layer_start_x, static_cast<int64_t>(xs));
+                const int64_t x_overlap_end = std::min(layer_end_x, static_cast<int64_t>(xe));
+                const int64_t y_overlap_start = std::max(layer_start_y, static_cast<int64_t>(ys));
+                const int64_t y_overlap_end = std::min(layer_end_y, static_cast<int64_t>(ye));
+                const int64_t z_overlap_start = std::max(layer_start_z, static_cast<int64_t>(zs));
+                const int64_t z_overlap_end = std::min(layer_end_z, static_cast<int64_t>(ze));
+
+                // True if there is an overlap between the requested region and the layer region
+                const bool overlaps = (x_overlap_start <= x_overlap_end) &&
+                                      (y_overlap_start <= y_overlap_end) &&
+                                      (z_overlap_start <= z_overlap_end);
+
+                if (!overlaps)
+                {
+                    // This layer is not included in the current access
+                    continue;
+                }
+
+                auto reader = parent_archive_inventory->find(l->source_name);
+
+                if (reader == parent_archive_inventory->end())
+                {
+                    // Source not in inventory
+                    continue;
+                }
+
+                const size_t scale = 1; // TODO, not currently implemented
+
+                // Calculate the overlap start-stop, in input space
+                const int64_t x_overlap_start_shifted = x_overlap_start + l->ioffsetx;
+                const int64_t x_overlap_end_shifted = x_overlap_end + l->ioffsetx;
+                const int64_t y_overlap_start_shifted = y_overlap_start + l->ioffsety;
+                const int64_t y_overlap_end_shifted = y_overlap_end + l->ioffsety;
+                const int64_t z_overlap_start_shifted = z_overlap_start + l->ioffsetz;
+                const int64_t z_overlap_end_shifted = z_overlap_end + l->ioffsetz;
+
+                const int64_t region_x_size = x_overlap_end_shifted - x_overlap_start_shifted;
+                const int64_t region_y_size = y_overlap_end_shifted - y_overlap_start_shifted;
+                const int64_t region_z_size = z_overlap_end_shifted - z_overlap_start_shifted;
+
+                uint16_t *region = reader->second->load_region(
+                    scale,
+                    x_overlap_start_shifted, x_overlap_end_shifted,
+                    y_overlap_start_shifted, y_overlap_end_shifted,
+                    z_overlap_start_shifted, z_overlap_end_shifted);
+
+                const int64_t cin = l->source_channel;
+                const int64_t cout = l->target_channel;
+
+                for (size_t i = x_overlap_start; i < x_overlap_end; i++)
+                {
+                    for (size_t j = y_overlap_start; j < y_overlap_end; j++)
+                    {
+                        for (size_t k = z_overlap_start; k < z_overlap_end; k++)
+                        {
+                            const int64_t i_s = i + l->ioffsetx;
+                            const int64_t j_s = j + l->ioffsety;
+                            const int64_t k_s = k + l->ioffsetz;
+
+                            // Calculate the coordinates of the input and output inside their respective buffers
+                            const size_t roffset = (cin * region_x_size * region_y_size * region_z_size) +
+                                                   ((k_s - z_overlap_start_shifted) * region_y_size * region_x_size) + 
+                                                   ((j_s - y_overlap_start_shifted) * region_x_size) + 
+                                                   ((i_s - x_overlap_start_shifted));
+
+                            const size_t ooffset = (cout * osizey * osizex * osizez) + // C
+                                                   ((k - zs) * osizey * osizex) +   // Z
+                                                   ((j - ys) * osizex) +            // Y
+                                                   ((i - xs));                      // X
+
+                            out_buffer[ooffset] = region[roffset];
+                        }
+                    }
+                }
+
+                free(region);
+            }
+        }
 
         if (CHUNK_TIMER)
         {
@@ -1057,21 +1360,6 @@ public:
 
     void print_info()
     {
-        /*
-        std::cout << "-----------------------------------" << std::endl;
-        std::cout << "File: " << fname << std::endl;
-        std::cout << "dtype = " << dtype << "; version = " << archive_version << ";" << std::endl;
-        std::cout << "Chunks: " << mchunkx << ", " << mchunky << ", " << mchunkz << std::endl;
-        std::cout << "Size: " << sizex << ", " << sizey << ", " << sizez << std::endl;
-        std::cout << "Tile Counts: " << mcountx << ", " << mcounty << ", " << mcountz << std::endl;
-        std::cout << "Scales: ";
-        for (size_t n : scales)
-            std::cout << n << ' ';
-        std::cout << "Channels = " << channel_count << std::endl;
-        std::cout << std::endl;
-        std::cout << "-----------------------------------" << std::endl;
-        */
-
         std::cout << '[' << fname << "] " << " dtype=" << dtype << " channels=" << channel_count << " chunks=(" << mchunkx << ','
                   << mchunky << ',' << mchunkz << ") size=(" << sizex << ',' << sizey << ',' << sizez << ") "
                   << "tile_counts=(" << mcountx << ',' << mcounty << ',' << mcountz << ") "
@@ -1081,5 +1369,17 @@ public:
             std::cout << n << ',';
 
         std::cout << "]" << std::endl;
+
+        if (type == DESCRIPTOR)
+        {
+            for (size_t i = 0; i < descriptor_layers.size(); i++)
+            {
+                std::cout << "\t[layer " << i << "] from=\"" << descriptor_layers[i]->source_name << "\":" << descriptor_layers[i]->source_channel
+                          << " ch=" << descriptor_layers[i]->target_channel
+                          << " size=(" << descriptor_layers[i]->sizex << ", " << descriptor_layers[i]->sizey << ", " << descriptor_layers[i]->sizez << ")"
+                          << " ooffset=(" << descriptor_layers[i]->ooffsetx << ", " << descriptor_layers[i]->ooffsety << ", " << descriptor_layers[i]->ooffsetz << ")"
+                          << std::endl;
+            }
+        }
     }
 };
