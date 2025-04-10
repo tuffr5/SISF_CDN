@@ -37,7 +37,7 @@ bool READ_ONLY_MODE = false;
 
 std::string DATA_PATH = "./data/";
 std::string SERVER_ROOT = "https://server/";
-const std::string VERSION_STRING = "V0.6.4";
+const std::string VERSION_STRING = "V0.6.5";
 
 using json = nlohmann::json;
 
@@ -1525,6 +1525,167 @@ int main(int argc, char *argv[])
 		res.end(); 
 	
 		log_time(data_id, "READ_RAW", scale, x_end-x_begin, y_end-y_begin, z_end-z_begin, begin); });
+
+	// Top-level info route with mesh reference
+	CROW_ROUTE(app, "/<string>/mesh/info")
+	([](crow::response &res, std::string data_id)
+	 {
+		data_id = str_first(data_id, '+');
+
+		std::string info_path = DATA_PATH + data_id + "/info";
+		std::ifstream info_file(info_path);
+		if (!info_file) {
+			res.code = 404;
+			res.end("Info file not found");
+			return;
+		}
+		
+		try {
+			json info_json = json::parse(info_file);
+			
+			res.write(info_json.dump());
+			res.end();
+			return;
+		} catch (const std::exception& e) {
+			res.code = 500;
+			res.end("Error parsing info file: " + std::string(e.what()));
+		} });
+
+	// Info within mesh subdirectory
+	CROW_ROUTE(app, "/<string>/mesh/mesh/info")
+	([](crow::response &res, std::string data_id)
+	 {
+		data_id = str_first(data_id, '+');
+		
+		std::string mesh_info_path = DATA_PATH + data_id + "/mesh/info";
+		std::ifstream mesh_info_file(mesh_info_path);
+		if (mesh_info_file) {
+			try {
+				json mesh_info_json = json::parse(mesh_info_file);
+				res.write(mesh_info_json.dump());
+				res.end();
+				return;
+			} catch (const std::exception& e) {
+				std::cerr << "Error parsing mesh info file: " << e.what() << std::endl;
+			}
+		}
+		
+		// If file doesn't exist or can't be parsed, create a default response
+		json response = {
+			{"@type", "neuroglancer_legacy_mesh"},
+			{"segment_properties", "../segment_properties"}
+		};
+		res.write(response.dump());
+		res.end(); });
+
+	// Segment properties for meshes
+	CROW_ROUTE(app, "/<string>/mesh/mesh/segment_properties")
+	([](crow::response &res, std::string data_id)
+	 {
+		data_id = str_first(data_id, '+');
+		
+		std::string properties_path = DATA_PATH + data_id + "/segment_properties";
+		std::ifstream properties_file(properties_path);
+		if (properties_file) {
+			try {
+				json properties_json = json::parse(properties_file);
+				res.write(properties_json.dump());
+				res.end();
+				return;
+			} catch (const std::exception& e) {
+				std::cerr << "Error parsing segment properties file: " << e.what() << std::endl;
+			}
+		}
+		
+		std::vector<json> ids = {};
+		std::vector<json> values = {};
+		
+		std::vector<std::string> mesh_files = glob_tool(DATA_PATH + data_id + "/mesh/*:0:0");
+		
+		for(const auto& mesh_file : mesh_files) {
+			size_t last_slash = mesh_file.find_last_of('/');
+			std::string filename = mesh_file.substr(last_slash + 1);
+			std::string segment_id = filename.substr(0, filename.find(":"));
+			
+			ids.push_back(segment_id);
+			values.push_back(segment_id);
+		}
+		
+		json id_prop;
+		id_prop["id"] = "label";
+		id_prop["type"] = "label";
+		id_prop["values"] = values;
+		
+		json toadd_inline;
+		toadd_inline["ids"] = ids;
+		std::vector<json> properties;
+		properties.push_back(id_prop);
+		toadd_inline["properties"] = properties;
+		
+		json response;
+		response["@type"] = "neuroglancer_segment_properties";
+		response["inline"] = toadd_inline;
+		
+		res.write(response.dump());
+		res.end(); });
+
+	// Retrieve mesh binary data or metadata
+	CROW_ROUTE(app, "/<string>/mesh/mesh/<string>")
+	([](crow::response &res, std::string data_id, std::string segment_meta)
+	 {
+		data_id = str_first(data_id, '+');
+		
+		if (segment_meta.find(":0:0") != std::string::npos) { // Binary mesh data file
+			std::string mesh_path = DATA_PATH + data_id + "/mesh/" + segment_meta;
+			
+			std::ifstream mesh_file(mesh_path, std::ios::binary);
+			if (!mesh_file) {
+				res.code = 404;
+				res.end("Mesh file not found");
+				return;
+			}
+			
+			mesh_file.seekg(0, std::ios::end);
+			size_t file_size = mesh_file.tellg();
+			mesh_file.seekg(0, std::ios::beg);
+			
+			std::vector<char> buffer(file_size);
+			mesh_file.read(buffer.data(), file_size);
+			
+			// Set content type to application/octet-stream
+			res.set_header("Content-Type", "application/octet-stream");
+			res.set_header("Content-Disposition", "attachment");
+			
+			res.body.assign(buffer.data(), file_size);
+			res.code = 200;
+		} else if (segment_meta.find(":0") != std::string::npos) {
+			std::string meta_path = DATA_PATH + data_id + "/mesh/" + segment_meta;
+			
+			std::ifstream meta_file(meta_path);
+			if (!meta_file) {
+				std::string segment_id = segment_meta.substr(0, segment_meta.find(":"));
+				std::string fragment_file = segment_id + ":0:0";
+				
+				std::string fragment_path = DATA_PATH + data_id + "/mesh/" + fragment_file;
+				if (!std::ifstream(fragment_path)) {
+					res.code = 404;
+					res.end("Mesh fragment not found");
+					return;
+				}
+				json metadata = {
+					{"fragments", {fragment_file}}
+				};
+				res.write(metadata.dump());
+			} else {
+				std::string content((std::istreambuf_iterator<char>(meta_file)), std::istreambuf_iterator<char>());
+				res.write(content);
+			}
+		} else {
+			res.code = 404;
+			res.end("Invalid mesh request format");
+		}
+		
+		res.end(); });
 
 	// @app.route("/data/<data_id>/<resolution>/<key>-<key>-<key>")
 	// This has to be last in the route list because it acts as a wildcard
