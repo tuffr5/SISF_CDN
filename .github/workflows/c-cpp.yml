@@ -19,10 +19,14 @@ jobs:
       run: sudo apt install -y build-essential libboost-all-dev libsqlite3-dev libasio-dev nasm cmake
     - name: install-ffmpeg
       run: sudo apt install -y ffmpeg libswscale-dev libavutil-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libpostproc-dev libswresample-dev
+    - name: install-hdf5
+      run: sudo apt install -y libhdf5-dev libc6-dev
     - name: build-x264
       run: cd x264; make -j 5; cd ..
     - name: build-zstd
       run: cd zstd; make -j 5; cd ..
+    - name: build-ffmpeg
+      run: cd ffmpeg_HDF5_filter; cmake .; make -j 5; cd ..
     - name: cmake
       run: cmake . || true
     - name: make

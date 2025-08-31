@@ -21,6 +21,9 @@ extern "C"
 #include <libswscale/swscale.h>
 #include <libavutil/avutil.h>
 #include <libavutil/opt.h>
+
+#include <ffmpeg_utils.h>
+    size_t ffmpeg_native(unsigned flags, const unsigned int cd_values[], size_t buf_size, void **buf);
 }
 
 #define IMAGE_GAIN 10
@@ -66,271 +69,6 @@ void read_threaded(void **buffer_ret, size_t *buffer_size, FILE *file, size_t si
 
     buffer_size[0] = current_size;
     buffer_ret[0] = buffer;
-}
-
-pixtype *decode_stack_subprocess(size_t sizex, size_t sizey, size_t sizez, void *buffer, size_t buffer_size)
-{
-    const size_t frame_size = sizex * sizey * sizeof(pixtype);
-    const size_t stack_size = frame_size * sizez;
-
-    std::string cmd = ffmpeg_location + " " + decode_params;
-
-    // Use subprocess
-    subprocess::Popen *p = new subprocess::Popen(
-        {"/bin/sh", "-c", cmd},
-        subprocess::output{subprocess::PIPE},
-        subprocess::input{subprocess::PIPE},
-        subprocess::error{subprocess::PIPE},
-        subprocess::bufsize{(int)256 * 256 * 256 * 2});
-
-    // size_t s = p->send((char *)buffer, buffer_size);
-    // std::cerr << "SENT " << s << std::endl;
-
-    // std::pair<subprocess::OutBuffer, subprocess::ErrBuffer> res = p->communicate((char *) buffer, buffer_size);
-    // std::vector<char> buf = res.first.buf;
-
-    auto buf = p->communicate((char *)buffer, buffer_size).first.buf;
-    size_t buf_size = buf.size();
-
-    // std::cerr << "Got " << buf_size << std::endl;
-
-    char *out = (char *)calloc(stack_size, sizeof(char));
-
-    // Data stored in ZXY, remap to XYZ
-    for (size_t x = 0; x < sizex; x++)
-    {
-        for (size_t y = 0; y < sizey; y++)
-        {
-            for (size_t z = 0; z < sizez; z++)
-            {
-                const size_t in_offset = (z * (sizex * sizey)) + (x * sizey) + y;
-
-                const size_t out_offset = (x * sizey * sizez) + (y * sizez) + z;
-
-                if (in_offset < buf_size)
-                {
-                    out[out_offset] = buf[in_offset];
-                }
-            }
-        }
-    }
-
-    delete p;
-
-    return (pixtype *)out;
-}
-
-std::string SVT_AV1_location_dec = "/home/loganaw/SVT-AV1/Bin/Release/SvtAv1DecApp";
-std::pair<size_t, pixtype *> decode_stack_AV1_decapp(size_t w, size_t h, size_t t, void *buffer, size_t buffer_size)
-{
-    const size_t frame_size = w * h * sizeof(pixtype);
-    const size_t stack_size = frame_size * t;
-
-    // std::string cmd = ffmpeg_location + " " + decode_params + " " + null_redirect;
-
-    std::string cmd = SVT_AV1_location_dec + " -i stdin -o stdout";
-
-    // Use subprocess
-    subprocess::Popen *p = new subprocess::Popen({"/bin/sh", "-c", cmd},
-                                                 subprocess::output{subprocess::PIPE}, subprocess::input{subprocess::PIPE});
-
-    p->send((char *)buffer, buffer_size);
-
-    auto buf = p->communicate().first.buf;
-
-    size_t buf_size = buf.size();
-    // std::cout << "Got " << buf_size << std::endl;
-    void *out = malloc(buf_size);
-    memcpy(out, buf.data(), buf_size);
-
-    if (buf_size != stack_size)
-        ;
-
-    delete p;
-
-    return {buf_size, (pixtype *)out};
-}
-
-std::pair<size_t, void *> encode_stack(size_t w, size_t h, size_t t, pixtype *stack)
-{
-    size_t frame_size = w * h * sizeof(pixtype);
-    size_t stack_size = frame_size * t;
-
-    std::stringstream cmd_build;
-    cmd_build << ffmpeg_location << " "
-              << "-f rawvideo -framerate " << target_framerate << "/1 -pix_fmt gray -s " << w << "x" << h
-              << " -i - -vcodec " << encoder_name << " -framerate " << target_framerate << "/1 " << other_encode_settings
-              << " -f rawvideo -pix_fmt gray -" << null_redirect;
-
-    // Use subprocess
-    subprocess::Popen *p = new subprocess::Popen(
-        {"/bin/sh", "-c", cmd_build.str()},
-        //{"cat"},
-        subprocess::output{subprocess::PIPE},
-        subprocess::input{subprocess::PIPE},
-        subprocess::error{subprocess::PIPE},
-        subprocess::close_fds{false},
-        subprocess::bufsize{(int)256 * 256 * 256 * 2},
-        subprocess::shell{false});
-
-    auto [outb, errb] = p->communicate((char *)stack, stack_size);
-
-    size_t buf_size = outb.buf.size();
-    void *out = malloc(buf_size);
-    memcpy(out, outb.buf.data(), buf_size);
-
-    p->wait();
-    p->kill();
-
-    delete p;
-
-    return {buf_size, out};
-}
-
-std::string SVT_AV1_location = "/home/loganaw/SVT-AV1/Bin/Release/SvtAv1EncApp";
-std::pair<size_t, void *> encode_stack_AV1_encapp(size_t w, size_t h, size_t t, pixtype *stack, size_t stack_size_in)
-{
-    std::stringstream cmd_build;
-    cmd_build << SVT_AV1_location << " "
-              << "--crf 20 "
-              << "--lp 4 "
-              << "-i - "
-              << "-w " << w << " "
-              << "-h " << h << " "
-              << "--fps " << target_framerate << " "
-              << "-b -";
-
-    // Use subprocess
-    subprocess::Popen *p = new subprocess::Popen(
-        {"/bin/sh", "-c", cmd_build.str()},
-        subprocess::output{subprocess::PIPE},
-        subprocess::input{subprocess::PIPE},
-        subprocess::error{subprocess::PIPE},
-        subprocess::close_fds{false},
-        subprocess::bufsize{(int)(w * h * t * 2)},
-        subprocess::shell{false});
-
-    auto [outb, errb] = p->communicate((char *)stack, stack_size_in);
-
-    size_t buf_size = outb.buf.size();
-    void *out = malloc(buf_size);
-    memcpy(out, outb.buf.data(), buf_size);
-
-    p->wait();
-    p->kill();
-
-    delete p;
-
-    return {buf_size, out};
-}
-
-std::pair<size_t, void *> encode_stack_x264(size_t w_in, size_t h_in, size_t t_in, pixtype *buffer_in)
-{
-    const int thread_count = 2;
-    const int show_stderr = X264_LOG_NONE; // X264_LOG_INFO
-
-    x264_param_t param;
-    x264_picture_t pic;
-    x264_picture_t pic_out;
-    x264_t *h;
-
-    int i_frame = 0;
-    int i_frame_size;
-    x264_nal_t *nal;
-    int i_nal;
-
-    /* Get default params for preset/tuning */
-    if (x264_param_default_preset(&param, "slower", NULL) < 0)
-    {
-        std::cerr << "Failed to set preset!" << std::endl;
-        // return -1;
-    }
-
-    /* Configure non-default params */
-    param.i_threads = thread_count;
-    param.i_lookahead_threads = thread_count;
-    param.i_bitdepth = 8;
-    param.i_csp = X264_CSP_I400;
-    param.i_width = w_in;
-    param.i_height = h_in;
-    param.i_fps_num = 24;
-    param.i_fps_den = 1;
-    param.b_vfr_input = 0;
-    param.b_repeat_headers = 1;
-    param.b_annexb = 1;
-    param.b_deterministic = 1;
-    param.i_log_level = show_stderr;
-
-    param.rc.i_rc_method = X264_RC_CRF;
-    int crf_qp_val = 10;
-    param.rc.i_qp_constant = crf_qp_val;
-    param.rc.i_qp_min = crf_qp_val;
-    param.rc.i_qp_max = crf_qp_val;
-
-    /* Apply profile restrictions. */
-    if (x264_param_apply_profile(&param, "high") < 0)
-    {
-        // return -1;
-    }
-
-    if (x264_picture_alloc(&pic, param.i_csp, param.i_width, param.i_height) < 0)
-    {
-        // return -1;
-    }
-
-    h = x264_encoder_open(&param);
-    if (!h)
-    {
-        x264_picture_clean(&pic);
-        // return -1;
-    }
-
-    int luma_size = param.i_width * param.i_height;
-
-    char *out = (char *)malloc(luma_size * t_in);
-    size_t out_offset = 0;
-
-    /* Encode frames */
-    for (size_t i_frame = 0; i_frame < t_in; i_frame++)
-    {
-        /* Read input frame */
-        // memset(pic.img.plane[0], (int)i_frame, luma_size);
-        memcpy(pic.img.plane[0], buffer_in + (luma_size * i_frame), luma_size);
-
-        pic.i_pts = i_frame;
-        i_frame_size = x264_encoder_encode(h, &nal, &i_nal, &pic, &pic_out);
-        if (i_frame_size < 0)
-        {
-            // return kill_stream(h, &pic);
-        }
-        else if (i_frame_size)
-        {
-            memcpy(out + out_offset, nal->p_payload, i_frame_size);
-            out_offset += i_frame_size;
-        }
-    }
-
-    /* Flush delayed frames */
-    while (x264_encoder_delayed_frames(h))
-    {
-        i_frame_size = x264_encoder_encode(h, &nal, &i_nal, NULL, &pic_out);
-        if (i_frame_size < 0)
-        {
-            // return kill_stream(h, &pic);
-        }
-        else if (i_frame_size)
-        {
-            memcpy(out + out_offset, nal->p_payload, i_frame_size);
-            out_offset += i_frame_size;
-        }
-    }
-
-    out = (char *)realloc(out, out_offset);
-
-    x264_encoder_close(h);
-    x264_picture_clean(&pic);
-
-    return {out_offset, out};
 }
 
 pixtype *uint16_to_pixtype(uint16_t *buffer, size_t len)
@@ -614,7 +352,8 @@ pixtype *decode_stack_264(size_t sizex, size_t sizey, size_t sizez, void *buffer
                     break;
                 }
 
-                if(frame_cnt < sizez) { // Ignore z buffer
+                if (frame_cnt < sizez)
+                { // Ignore z buffer
                     for (size_t x = 0; x < sizex; x++)
                     {
                         for (size_t y = 0; y < sizey; y++)
@@ -646,7 +385,8 @@ pixtype *decode_stack_264(size_t sizex, size_t sizey, size_t sizez, void *buffer
             break;
         }
 
-        if(frame_cnt < sizez) { // Ignore z buffer
+        if (frame_cnt < sizez)
+        { // Ignore z buffer
             for (size_t x = 0; x < sizex; x++)
             {
                 for (size_t y = 0; y < sizey; y++)
@@ -697,11 +437,11 @@ pixtype *decode_stack_AV1(size_t sizex, size_t sizey, size_t sizez, void *buffer
     AVIOContext *ioContext = avio_alloc_context(
         static_cast<unsigned char *>(av_malloc(av_context_buffer_size)), // Internal buffer
         av_context_buffer_size,                                          // Buffer size
-        0,                                             // Write flag (0 for read-only)
-        &memBuffer,                                    // Opaque pointer
-        memorybuffer_read_packet,                      // Read callback
-        nullptr,                                       // Write callback (not needed)
-        nullptr                                        // Seek callback (optional)
+        0,                                                               // Write flag (0 for read-only)
+        &memBuffer,                                                      // Opaque pointer
+        memorybuffer_read_packet,                                        // Read callback
+        nullptr,                                                         // Write callback (not needed)
+        nullptr                                                          // Seek callback (optional)
     );
 
     if (!ioContext)
@@ -805,7 +545,8 @@ pixtype *decode_stack_AV1(size_t sizex, size_t sizey, size_t sizez, void *buffer
                     break;
                 }
 
-                if(frame_cnt < sizez) { // Ignore z buffer
+                if (frame_cnt < sizez)
+                { // Ignore z buffer
                     for (size_t x = 0; x < sizex; x++)
                     {
                         for (size_t y = 0; y < sizey; y++)
@@ -837,7 +578,8 @@ pixtype *decode_stack_AV1(size_t sizex, size_t sizey, size_t sizez, void *buffer
             break;
         }
 
-        if(frame_cnt < sizez) { // Ignore z buffer
+        if (frame_cnt < sizez)
+        { // Ignore z buffer
             for (size_t x = 0; x < sizex; x++)
             {
                 for (size_t y = 0; y < sizey; y++)
@@ -857,6 +599,72 @@ pixtype *decode_stack_AV1(size_t sizex, size_t sizey, size_t sizez, void *buffer
 
     // Cleanup
     avformat_close_input(&formatContext);
+
+    return (pixtype *)out;
+}
+
+pixtype *decode_stack_native(void *buffer, size_t buffer_size)
+{
+    void *out;
+
+    size_t offset = 0;
+    const uint8_t* byte_buffer = static_cast<const uint8_t*>(buffer);
+
+    uint32_t metadata_size = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+    uint32_t version = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+
+    // TODO Check version match
+
+    uint32_t enc_id = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+    uint32_t dec_id = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+    uint32_t width = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+    uint32_t height = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+    uint32_t depth = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+    uint32_t bit_mode = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+    uint32_t preset_id = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+    uint32_t tune_id = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+    uint32_t crf = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+    uint32_t film_grain = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+    uint32_t stored_gpu_id = *((uint32_t *)(byte_buffer + offset));
+    offset += sizeof(uint32_t);
+
+    uint64_t compressed_size = *((uint64_t *)(byte_buffer + offset));
+    offset += sizeof(uint64_t);
+
+    const unsigned int cd_values[11] = {
+        enc_id,
+        dec_id,
+        width,
+        height,
+        depth,
+        bit_mode,
+        preset_id,
+        tune_id,
+        crf,
+        film_grain,
+        0 // TODO Fix
+    };
+
+    size_t buffer_leftover = buffer_size - offset;
+    out = malloc(buffer_leftover);
+
+    // TODO check if buffer_leftover == cd_values->compressed_size
+
+    memcpy(out, byte_buffer + offset, buffer_leftover);
+
+    size_t outsize = ffmpeg_native(!FFMPEG_FLAG_COMPRESS, cd_values, compressed_size, &out);
 
     return (pixtype *)out;
 }

@@ -4,3 +4,6 @@
 [submodule "x264"]
 	path = x264
 	url = https://code.videolan.org/videolan/x264.git
+[submodule "ffmpeg_HDF5_filter"]
+	path = ffmpeg_HDF5_filter
+	url = https://github.com/Cai-Lab-at-University-of-Michigan/ffmpeg_HDF5_filter.git

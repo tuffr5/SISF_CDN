@@ -329,17 +329,10 @@ public:
                 break;
 
             case 2:
-                // Decompress with vidlib
-                read_decomp_buffer_pt = decode_stack_264(sizex, sizey, sizez, read_buffer, sel->size);
-                pix_cnt = sizex * sizey * sizez;
-                decomp_size = pix_cnt * sizeof(uint16_t);
-                read_decomp_buffer = (char *)pixtype_to_uint16(read_decomp_buffer_pt, pix_cnt);
-                free(read_decomp_buffer_pt);
-                break;
-
             case 3:
                 // Decompress with vidlib 2
-                read_decomp_buffer_pt = decode_stack_AV1(sizex, sizey, sizez, read_buffer, sel->size);
+                // read_decomp_buffer_pt = decode_stack_AV1(sizex, sizey, sizez, read_buffer, sel->size);
+                read_decomp_buffer_pt = decode_stack_native(read_buffer, sel->size);
                 pix_cnt = sizex * sizey * sizez;
                 decomp_size = pix_cnt * sizeof(uint16_t);
                 read_decomp_buffer = (char *)pixtype_to_uint16(read_decomp_buffer_pt, pix_cnt);
@@ -1330,14 +1323,14 @@ public:
 
                             // Calculate the coordinates of the input and output inside their respective buffers
                             const size_t roffset = (cin * region_x_size * region_y_size * region_z_size) +
-                                                   ((k_s - z_overlap_start_shifted) * region_y_size * region_x_size) + 
-                                                   ((j_s - y_overlap_start_shifted) * region_x_size) + 
+                                                   ((k_s - z_overlap_start_shifted) * region_y_size * region_x_size) +
+                                                   ((j_s - y_overlap_start_shifted) * region_x_size) +
                                                    ((i_s - x_overlap_start_shifted));
 
                             const size_t ooffset = (cout * osizey * osizex * osizez) + // C
-                                                   ((k - zs) * osizey * osizex) +   // Z
-                                                   ((j - ys) * osizex) +            // Y
-                                                   ((i - xs));                      // X
+                                                   ((k - zs) * osizey * osizex) +      // Z
+                                                   ((j - ys) * osizex) +               // Y
+                                                   ((i - xs));                         // X
 
                             out_buffer[ooffset] = region[roffset];
                         }
