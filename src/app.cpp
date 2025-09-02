@@ -31,13 +31,13 @@
 
 #include "counter.hpp"
 
-int port = 6000;
+int port = 100;
 int THREAD_COUNT = 32;
 bool READ_ONLY_MODE = false;
 
 std::string DATA_PATH = "./data/";
 std::string SERVER_ROOT = "https://server/";
-const std::string VERSION_STRING = "V0.6.5";
+const std::string VERSION_STRING = "V0.7.0";
 
 using json = nlohmann::json;
 
@@ -706,6 +706,118 @@ int main(int argc, char *argv[])
 		}
 
 		res.end(out.str()); });
+
+	// @app.route("/data/<data_id>/<resolution>/<key>-<key>-<key>")
+	CROW_ROUTE(app, "/<string>/write/<string>/<string>").methods(crow::HTTPMethod::PATCH)
+	([](crow::request &req, crow::response &res, std::string data_id_in, std::string resolution_id, std::string tile_key)
+	 {
+		// std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
+		archive_reader *reader = search_inventory(data_id);
+
+		if (reader == nullptr)
+		{
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found\n");
+			return;
+		}
+
+		if(!(reader->type == ArchiveType::SISF))
+		{
+			res.code = crow::status::FORBIDDEN;
+			res.end("403 Forbidden\n");
+			return;
+		}
+
+		if(reader->channel_count != 1)
+		{
+			res.code = crow::status::FORBIDDEN;
+			res.end("403 Forbidden\n");
+			return;
+		}
+
+		if (!reader->verify_protection(filters) || !reader->is_protected || READ_ONLY_MODE)
+		{
+			res.code = crow::status::FORBIDDEN;
+			res.end("403 Forbidden\n");
+			return;
+		}
+
+		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
+		// <xBegin>-<xEnd>_<yBegin>-<yEnd>_<zBegin>-<zEnd>
+		if (sscanf(tile_key.c_str(), "%u-%u_%u-%u_%u-%u", &x_begin, &x_end, &y_begin, &y_end, &z_begin, &z_end) != 6)
+		{
+			res.code = crow::status::BAD_REQUEST;
+			res.end("400 Bad Request -- Invalid range string\n");
+			return;
+		}
+
+		size_t scale;
+		try
+		{
+			scale = std::stoi(resolution_id);
+		}
+		catch (const std::invalid_argument &e)
+		{
+			scale = 0;
+		}
+		catch (const std::out_of_range &e)
+		{
+			scale = 0;
+		}
+
+		// if (scale == 0)
+		if (scale != 1)
+		{
+			res.code = crow::status::BAD_REQUEST;
+			res.end("400 Bad Request -- Invalid scale string\n");
+			return;
+		}
+
+		// size_t scale = stoi(resolution_id);
+		size_t chunk_sizes[3] = {x_end - x_begin, y_end - y_begin, z_end - z_begin};
+		std::tuple<size_t, size_t, size_t> image_size = reader->get_size(scale);
+
+		{
+			bool out_of_range = false;
+			if (!reader->contains_scale(scale))
+			{
+				out_of_range = true;
+			}
+			else
+			{
+				out_of_range |= x_end > std::get<0>(image_size);
+				out_of_range |= y_end > std::get<1>(image_size);
+				out_of_range |= z_end > std::get<2>(image_size);
+			}
+
+			if (out_of_range)
+			{
+				res.code = crow::status::BAD_REQUEST;
+				res.end("400 Bad Request -- Invalid data range\n");
+				return;
+			}
+		}
+
+		size_t size_of_insert = chunk_sizes[0] * chunk_sizes[1] * chunk_sizes[2] * sizeof(uint16_t);
+
+		std::string insert = req.body;
+
+		if(insert.size() != size_of_insert)
+		{
+			res.code = crow::status::BAD_REQUEST;
+			res.end("400 Bad Request -- Invalid insert size\n");
+			return;
+		}
+
+		reader->replace_region(
+			1, x_begin, x_end, y_begin, y_end, z_begin, z_end, insert.c_str()
+		);
+
+		res.code = crow::status::OK;
+		res.body = "done.";
+		res.end();
+	});
 
 	// @app.route("/meanshift/<data_id>/<point>/")
 	CROW_ROUTE(app, "/<string>/meanshift/<string>")
