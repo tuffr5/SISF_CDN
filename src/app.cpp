@@ -149,7 +149,7 @@ void load_inventory()
 			loc = froot.find_last_of('/');
 			std::string dset_name = froot.substr(loc + 1);
 
-			if(archive_inventory.count(dset_name) != 0)
+			if (archive_inventory.count(dset_name) != 0)
 			{
 				continue;
 			}
@@ -182,7 +182,10 @@ archive_reader *search_inventory(std::string key)
 	auto archive_search = archive_inventory.find(key);
 	if (archive_search != archive_inventory.end())
 	{
-		return archive_search->second;
+		if (archive_search->second->is_valid)
+		{
+			return archive_search->second;
+		}
 	}
 
 	{
@@ -194,7 +197,10 @@ archive_reader *search_inventory(std::string key)
 	archive_search = archive_inventory.find(key);
 	if (archive_search != archive_inventory.end())
 	{
-		return archive_search->second;
+		if (archive_search->second->is_valid)
+		{
+			return archive_search->second;
+		}
 	}
 
 	return nullptr;
@@ -1476,7 +1482,7 @@ int main(int argc, char *argv[])
 		std::vector<json> scales;
 		for(size_t scale : reader->scales) {
 			std::tuple<size_t, size_t, size_t> res_scaled = reader->get_res(scale);
-			std::vector<uint32_t> res = {
+			std::vector<uint32_t> resolution = {
 				(uint32_t) std::get<0>(res_scaled),
 				(uint32_t) std::get<1>(res_scaled),
 				(uint32_t) std::get<2>(res_scaled)
@@ -1496,7 +1502,7 @@ int main(int argc, char *argv[])
 
 			to_add["encoding"] = "raw";
 			to_add["key"] = std::to_string(scale);
-			to_add["resolution"] = res;
+			to_add["resolution"] = resolution;
 
 			//std::tuple<size_t, size_t, size_t> sizes = reader->get_size(scale);
 			//to_add["size"] = {
@@ -1506,6 +1512,12 @@ int main(int argc, char *argv[])
 			//};
 
 			packed_reader * raw_reader = reader->get_mchunk(scale, channel, chunk_i, chunk_j, chunk_k);
+
+			if(raw_reader == nullptr || raw_reader == 0) {
+				res.code = crow::status::NOT_FOUND;
+				res.end("404 Not Found\n");
+				return;
+			}
 
 			to_add["size"] = {
 				raw_reader->sizex,
@@ -1576,6 +1588,12 @@ int main(int argc, char *argv[])
 		const size_t out_buffer_size = sizeof(uint16_t) * chunk_sizes[0] * chunk_sizes[1] * chunk_sizes[2] * reader->channel_count;
 
 		packed_reader * chunk_reader = reader->get_mchunk(scale, channel, chunk_i, chunk_j, chunk_k);
+
+		if(chunk_reader == nullptr || chunk_reader == 0) {
+            res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found\n");
+			return;
+        }
 
 		uint16_t * out_buffer = (uint16_t*) malloc(out_buffer_size);
 

@@ -59,6 +59,7 @@
 
 #define CHUNK_TIMER 0
 #define DEBUG_SLICING 0
+#define IO_RETRY_COUNT 5
 
 size_t mchunk_uuid = 0;
 std::mutex mchunk_uuid_mutex;
@@ -138,9 +139,10 @@ class packed_reader
 {
 private:
     const size_t entry_file_line_size = 8 + 4;
+    const size_t header_size_expected = sizeof(uint16_t) * 7 + sizeof(uint64_t) * 9;
 
 public:
-    bool found;
+    bool is_valid;
     uint16_t channel_count;
     uint16_t dtype, version;
     uint16_t compression_type;
@@ -160,48 +162,71 @@ public:
 
     packed_reader(size_t chunk_id, std::string metadata_fname_in, std::string data_fname_in)
     {
+        is_valid = false;
         this_mchunk_id = chunk_id;
         meta_fname = metadata_fname_in;
         data_fname = data_fname_in;
 
         std::ifstream file(meta_fname, std::ios::in | std::ios::binary);
 
-        // if (file.fail())
-        //{
-        //     std::cerr << "Fopen failed (chunk metadata)" << std::endl;
-        //     found = false
-        //     return;
-        // }
+        if (file.fail())
+        {
+            std::cerr << "Fopen failed (chunk metadata)" << std::endl;
+            return;
+        }
 
-        found = true;
-
+        std::streamsize bytes_read = 0;
         file.read((char *)&version, sizeof(uint16_t));
+        bytes_read += file.gcount();
         file.read((char *)&dtype, sizeof(uint16_t));
+        bytes_read += file.gcount();
         file.read((char *)&channel_count, sizeof(uint16_t));
+        bytes_read += file.gcount();
         file.read((char *)&compression_type, sizeof(uint16_t));
+        bytes_read += file.gcount();
 
         file.read((char *)&chunkx, sizeof(uint16_t));
+        bytes_read += file.gcount();
         file.read((char *)&chunky, sizeof(uint16_t));
+        bytes_read += file.gcount();
         file.read((char *)&chunkz, sizeof(uint16_t));
+        bytes_read += file.gcount();
         file.read((char *)&sizex, sizeof(uint64_t));
+        bytes_read += file.gcount();
         file.read((char *)&sizey, sizeof(uint64_t));
+        bytes_read += file.gcount();
         file.read((char *)&sizez, sizeof(uint64_t));
+        bytes_read += file.gcount();
 
         file.read((char *)&cropstartx, sizeof(uint64_t));
+        bytes_read += file.gcount();
         file.read((char *)&cropendx, sizeof(uint64_t));
+        bytes_read += file.gcount();
         file.read((char *)&cropstarty, sizeof(uint64_t));
+        bytes_read += file.gcount();
         file.read((char *)&cropendy, sizeof(uint64_t));
+        bytes_read += file.gcount();
         file.read((char *)&cropstartz, sizeof(uint64_t));
+        bytes_read += file.gcount();
         file.read((char *)&cropendz, sizeof(uint64_t));
+        bytes_read += file.gcount();
+
+        header_size = file.tellg();
+        file.close();
+
+        if (header_size != header_size_expected || bytes_read != header_size_expected)
+        {
+            std::cerr << "Metadata read failed (short read)" << std::endl;
+            return;
+        }
 
         countx = (sizex + ((size_t)chunkx) - 1) / ((size_t)chunkx);
         county = (sizey + ((size_t)chunky) - 1) / ((size_t)chunky);
         countz = (sizez + ((size_t)chunkz) - 1) / ((size_t)chunkz);
 
-        max_chunk_size *= channel_count * chunkx * chunky * chunkz * sizeof(uint16_t);
+        max_chunk_size = channel_count * chunkx * chunky * chunkz * sizeof(uint16_t);
 
-        header_size = file.tellg();
-        file.close();
+        is_valid = true;
     }
 
     ~packed_reader()
@@ -225,8 +250,7 @@ public:
 
         const size_t offset = header_size + (entry_file_line_size * id);
 
-        const size_t retry_count = 5;
-        for (size_t i = 0; i < retry_count; i++)
+        for (size_t i = 0; i < IO_RETRY_COUNT; i++)
         {
             std::ifstream file(meta_fname, std::ios::in | std::ios::binary);
 
@@ -238,8 +262,17 @@ public:
 
             file.seekg(offset);
             file.read((char *)&(out->offset), sizeof(uint64_t));
+            std::streamsize bytes_read = file.gcount();
             file.read((char *)&(out->size), sizeof(uint32_t));
+            bytes_read += file.gcount();
             file.close();
+
+            if (bytes_read != sizeof(uint32_t) + sizeof(uint64_t))
+            {
+                std::cerr << "Metadata read failed (short read)" << std::endl;
+                continue;
+            }
+
             break;
         }
 
@@ -250,14 +283,13 @@ public:
     {
         const size_t offset = header_size + (entry_file_line_size * id);
 
-        const size_t retry_count = 5;
-        for (size_t i = 0; i < retry_count; i++)
+        for (size_t i = 0; i < IO_RETRY_COUNT; i++)
         {
             std::fstream file(meta_fname, std::ios::in | std::ios::out | std::ios::binary);
 
             if (file.fail())
             {
-                std::cerr << "Fopen failed (metadata)" << std::endl;
+                std::cerr << "Fopen failed (metadata write)" << std::endl;
                 continue;
             }
 
@@ -318,21 +350,37 @@ public:
             size_t buffer_size = sel->size;
             uint16_t *read_buffer = (uint16_t *)malloc(buffer_size);
 
-            const size_t retry_count = 10;
-            for (size_t i = 0; i < retry_count; i++)
+            bool read_failed = true;
+            for (size_t i = 0; i < IO_RETRY_COUNT; i++)
             {
                 std::ifstream file(data_fname, std::ios::in | std::ios::binary);
 
                 if (file.fail())
                 {
-                    std::cerr << "Fopen failed" << std::endl;
+                    //std::cerr << "Fopen failed" << std::endl;
                     continue;
                 }
 
                 file.seekg(sel->offset);
                 file.read((char *)read_buffer, sel->size);
+                std::streamsize bytes_read = file.gcount();
                 file.close();
+                if (bytes_read != sel->size)
+                {
+                    //std::cerr << "Read failed (short read)" << std::endl;
+                    continue;
+                }
+                read_failed = false;
                 break;
+            }
+
+            // Check for read failure
+            if (read_failed)
+            {
+                //std::cerr << "Read failed (max retries)" << std::endl;
+                free(read_buffer);
+                free(sel);
+                return out;
             }
 
             // Decompress
@@ -538,6 +586,7 @@ class archive_reader
 {
 public:
     bool is_protected = false;
+    bool is_valid = true;
     bool metadata_json = false;
 
     std::string fname; // "./example_dset"
@@ -1087,9 +1136,10 @@ public:
         std::tuple<size_t, size_t, size_t, size_t, size_t> id_tuple = std::make_tuple(scale, channel, i, j, k);
 
         mchunk_buffer_mutex.lock();
+
         packed_reader *out = mchunk_buffer[id_tuple];
 
-        if (out == 0)
+        if (out == 0 || out == nullptr)
         {
             std::stringstream ss;
             ss << "chunk_" << i << '_' << j << '_' << k << '.' << channel << '.' << scale << 'X';
@@ -1104,6 +1154,12 @@ public:
             mchunk_uuid_mutex.unlock();
 
             out = new packed_reader(random_id, chunk_meta_name, chunk_data_name);
+
+            if (!out->is_valid)
+            {
+                delete out;
+                out = nullptr;
+            }
 
             mchunk_buffer[id_tuple] = out;
         }
@@ -1133,6 +1189,7 @@ public:
         {
             // Define map for storing already decompressed chunks
             std::map<std::tuple<size_t, size_t, size_t, size_t, size_t>, uint16_t *> chunk_cache;
+            std::set<std::tuple<size_t, size_t, size_t, size_t, size_t>> back_mchunks;
 
             // Scaled metachunk size
             const size_t mcx = mchunkx / scale;
@@ -1186,7 +1243,22 @@ public:
                                 last_c != c)
                             {
                                 force = true;
-                                chunk_reader = get_mchunk(scale, c, chunk_id_x, chunk_id_y, chunk_id_z);
+
+                                bool is_bad = back_mchunks.count({scale, c, chunk_id_x, chunk_id_y, chunk_id_z}) > 0;
+
+                                if(!is_bad) {
+                                    chunk_reader = get_mchunk(scale, c, chunk_id_x, chunk_id_y, chunk_id_z);
+                                } else {
+                                    chunk_reader = nullptr;
+                                }
+
+                                if (chunk_reader == nullptr || chunk_reader == 0)
+                                {
+                                    if(!is_bad) {
+                                        back_mchunks.insert({scale, c, chunk_id_x, chunk_id_y, chunk_id_z});
+                                    }
+                                    continue;
+                                }
 
                                 last_x = chunk_id_x;
                                 last_y = chunk_id_y;
