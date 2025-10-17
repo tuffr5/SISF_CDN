@@ -113,6 +113,35 @@ uint16_t *pixtype_to_uint16(pixtype *buffer, size_t len)
     return out;
 }
 
+uint16_t *uint8_to_uint16_crop(uint8_t *buffer, size_t buffer_size, size_t ixsize, size_t iysize, size_t izsize, size_t oxsize, size_t oysize, size_t ozsize)
+{
+    uint16_t *out = (uint16_t *)malloc(oxsize * oysize * ozsize * sizeof(uint16_t));
+
+    for (size_t x = 0; x < oxsize; x++)
+    {
+        for (size_t y = 0; y < oysize; y++)
+        {
+            for (size_t z = 0; z < ozsize; z++)
+            {
+                size_t ioffset = (x * iysize * izsize) + (y * izsize) + z;
+                size_t ooffset = (x * oysize * ozsize) + (y * ozsize) + z;
+
+                uint16_t v = 0;
+                if (ioffset < buffer_size)
+                {
+                    v = buffer[ioffset];
+                }
+
+                v *= v;
+
+                out[ooffset] = v;
+            }
+        }
+    }
+
+    return out;
+}
+
 std::pair<size_t, uint8_t *> uint16_to_pixtype_YUV420(uint16_t *buffer, size_t w, size_t h, size_t t)
 {
     size_t page_offset = 3 * w * h * sizeof(uint8_t) / 2;
@@ -603,12 +632,12 @@ pixtype *decode_stack_AV1(size_t sizex, size_t sizey, size_t sizez, void *buffer
     return (pixtype *)out;
 }
 
-pixtype *decode_stack_native(void *buffer, size_t buffer_size)
+std::tuple<pixtype *, size_t, std::tuple<uint32_t, uint32_t, uint32_t>> decode_stack_native(void *buffer, size_t buffer_size)
 {
     void *out;
 
     size_t offset = 0;
-    const uint8_t* byte_buffer = static_cast<const uint8_t*>(buffer);
+    const uint8_t *byte_buffer = static_cast<const uint8_t *>(buffer);
 
     uint32_t metadata_size = *((uint32_t *)(byte_buffer + offset));
     offset += sizeof(uint32_t);
@@ -666,5 +695,5 @@ pixtype *decode_stack_native(void *buffer, size_t buffer_size)
 
     size_t outsize = ffmpeg_native(!FFMPEG_FLAG_COMPRESS, cd_values, compressed_size, &out);
 
-    return (pixtype *)out;
+    return {(pixtype *)out, outsize, {width, height, depth}};
 }

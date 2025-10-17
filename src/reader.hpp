@@ -84,7 +84,7 @@ using json = nlohmann::json;
 std::chrono::duration cache_lock_timeout = std::chrono::milliseconds(10);
 
 std::timed_mutex global_chunk_cache_mutex;
-size_t global_cache_size = 5000;
+size_t global_cache_size = 100;
 global_chunk_line *global_chunk_cache = (global_chunk_line *)calloc(global_cache_size, sizeof(global_chunk_line));
 size_t global_chunk_cache_last = 0;
 
@@ -384,9 +384,11 @@ public:
             }
 
             // Decompress
-            size_t decomp_size, pix_cnt;
+            size_t decomp_size;
             char *read_decomp_buffer;
             pixtype *read_decomp_buffer_pt;
+
+            uint32_t height, width, depth = 0;
 
             // 1 -> zstd
             // 2 -> 264
@@ -403,10 +405,18 @@ public:
             case 3:
                 // Decompress with vidlib 2
                 // read_decomp_buffer_pt = decode_stack_AV1(sizex, sizey, sizez, read_buffer, sel->size);
-                read_decomp_buffer_pt = decode_stack_native(read_buffer, sel->size);
-                pix_cnt = sizex * sizey * sizez;
-                decomp_size = pix_cnt * sizeof(uint16_t);
-                read_decomp_buffer = (char *)pixtype_to_uint16(read_decomp_buffer_pt, pix_cnt);
+                auto decode_result = decode_stack_native(read_buffer, sel->size);
+                
+                read_decomp_buffer_pt = std::get<0>(decode_result);
+                decomp_size = std::get<1>(decode_result);
+
+                width = std::get<0>(std::get<2>(decode_result));
+                height = std::get<1>(std::get<2>(decode_result));
+                depth = std::get<2>(std::get<2>(decode_result));
+
+                read_decomp_buffer = (char *) uint8_to_uint16_crop(read_decomp_buffer_pt, decomp_size, width, height, depth, sizex, sizey, sizez);
+                decomp_size = sizex * sizey * sizez * sizeof(uint16_t);
+
                 free(read_decomp_buffer_pt);
                 break;
             }
