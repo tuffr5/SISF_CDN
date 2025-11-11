@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <cstdint>
 
+#include <random>
+
 std::string read_env_variable(std::string name)
 {
     const char *env_var = std::getenv(name.c_str());
@@ -598,5 +600,46 @@ void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, siz
         float param = std::stof(filter_param);
 
         clahe_1d(data, data_size, param);
+    }
+
+    if (filter_name == "noise")
+    {
+        float param = std::stof(filter_param);
+
+        for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
+        {
+            float v = data[i];
+
+            float noise = ((float)rand() / (float)RAND_MAX) * param;
+
+            v += noise;
+
+            v = std::max((float)std::numeric_limits<uint16_t>::min(), v);
+            v = std::min((float)std::numeric_limits<uint16_t>::max(), v);
+
+            data[i] = v;
+        }
+    }
+
+    if (filter_name == "poissonnoise")
+    {
+        // float param = std::stof(filter_param);
+
+        std::random_device rd;
+        std::mt19937 gen(rd());
+
+        for (size_t i = 0; i < data_size / sizeof(uint16_t); i++)
+        {
+            uint16_t v = data[i];
+
+            // Poisson distribution mean = pixel value
+            std::poisson_distribution<uint16_t> poisson(v);
+            v = poisson(gen);
+
+            v = std::max(std::numeric_limits<uint16_t>::min(), v);
+            v = std::min(std::numeric_limits<uint16_t>::max(), v);
+
+            data[i] = v;
+        }
     }
 }
