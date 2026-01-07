@@ -41,16 +41,49 @@ These functions allow accessing tiled data, one tile at a time. Notably, this ig
 | `/<dataset id>/raw_access/<c>,<i>,<j>,<k>/info` | Returns a Neuroglancer-formatted info file for the SISF chunk represented by color `c`, and chunk coordinate `i,j,k` | 
 | `/<dataset id>/raw_access/<c>,<i>,<j>,<k>/<res>/<xs>-<xe>_<ys>-<ye>_<zs>-<ze>` | Downloads a Fortran-order image chunk of the region defined by the boundary `[xs,xe)`, `[ys,ye)`, `[zs,ze)` and resolution id `res` | 
 
+## Image Filtering
 
+The CDN image access commands supports a collection of image filters which are appended to the end of the `dataset id` specification.
 
-## C++ Libraries
+### Command Syntax
 
-1. Crow-cpp ([https://crowcpp.org/master/](https://crowcpp.org/master/))
-   - see `src/crow.h` for more information.
-2. C++ Subprocess from Arun Muralidharan ([https://github.com/arun11299/cpp-subprocess](https://github.com/arun11299/cpp-subprocess))
-   - see `src/subprocess.hpp` for more information.
-3. JSON for Modern C++ from Niels Lohmann ([https://github.com/nlohmann/json](https://github.com/nlohmann/json))
-   - see `src/json.hpp` for more information.
+To specify filters, `<dataset id>` is replaced with the syntax:
+
+```
+<dataset id>+<filter 1 name>=<filter 1 param>&<filter 2 name>&<filter 2 param>& ...
+```
+
+Each filter is applied in series with the input of filter 1 being the raw image, the input of filter 2 being the output of filter 1, and so on. At each step, data is serialized to `uint16`.
+
+As an example, if you wanted to view an image called `image` while applying a 10 AU offset and scaling the image by a slope of 2, you would use the following in place of `<dataset id>`:
+
+```
+image+offset=10&scale=2
+```
+
+### Available Commands
+
+| Command  | Description |
+|----------|-------------|
+| `offset` | Adds a constant value to each pixel value. |
+| `gamma`  | Applies a power function (pixel value to power of parameter). |
+| `gammascaled` | Power function where pixel values are normalized to a [0,1] range before applying. |
+| `scale`  | Multiplies each pixel value by given value. |
+| `weiner` | Applies weiner filter (1D for each chunk). |
+| `gaussian` | Applies a gaussian filter of given sigma (3D, but will run 2D if a 2D read is performed). |
+| `clahe`  | Runs a 1D clahe transform (https://en.wikipedia.org/wiki/Adaptive_histogram_equalization). The parameter specifies the clip limit of the clahe function (16bit range). |
+| `noise`  | Adds random noise sampled from the C++ random function (https://en.cppreference.com/w/c/numeric/random/rand), scaled by the input parameter. |
+| `poissonnoise` | Adds random noise sampled from a poisson distribution. |
+
+### Maximum Projection
+
+There is a special command, `project`, which can be used to perform a axis-aligned data projection and can be optionally be modified by the following commands:
+
+| Command  | Description |
+|----------|-------------|
+| `project` | Turns on maximum projection mode, the parameter specifies how many frames to project, in the full resolution. The number of frames projected in lower resolutions are reduced proportionally. |
+| `project_axis` | Chooses the direction the projection should be performed (`x`, `y`, `z`, defaults to `z`) |
+| `project_function` | Chooses what mathematical function to perform a projection with (`max`, `min`, `avg`, default `max`) |
 
 ## Local Setup
 
@@ -178,3 +211,28 @@ for i in range(count):
 #### `dtype`
 - `1 -> uint16`
 - `2 -> uint8` (not implemented) 
+
+## References
+
+### Citation
+
+If you find this project to be useful for your research, we ask that you cite:
+
+```
+A browser-based platform for storage, visualization, and analysis of large-scale 3D images in HPC environments
+
+Logan A Walker, Wei Jie Lee, Bin Duan, Menelik Weatherspoon, Ye Li, Fred Y. Shen, Mou-Chi Cheng, Xiaoman Niu, Jacob Eggerd, Bin Xie, Jimmy Hon Pong Cheng, Humphrey Xu, Xiao-Xiang Zhong, Hehai Jiang, Meng Cui, Yan Yan, Dawen Cai
+
+bioRxiv 2024.10.04.616591; doi: https://doi.org/10.1101/2024.10.04.616591
+```
+
+### Library references
+
+This project would not be possible without the following C++ dependencies:
+
+1. Crow-cpp ([https://crowcpp.org/master/](https://crowcpp.org/master/))
+   - see `src/crow.h` for more information.
+2. C++ Subprocess from Arun Muralidharan ([https://github.com/arun11299/cpp-subprocess](https://github.com/arun11299/cpp-subprocess))
+   - see `src/subprocess.hpp` for more information.
+3. JSON for Modern C++ from Niels Lohmann ([https://github.com/nlohmann/json](https://github.com/nlohmann/json))
+   - see `src/json.hpp` for more information.
