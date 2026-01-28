@@ -357,7 +357,7 @@ public:
 
                 if (file.fail())
                 {
-                    //std::cerr << "Fopen failed" << std::endl;
+                    // std::cerr << "Fopen failed" << std::endl;
                     continue;
                 }
 
@@ -367,7 +367,7 @@ public:
                 file.close();
                 if (bytes_read != sel->size)
                 {
-                    //std::cerr << "Read failed (short read)" << std::endl;
+                    // std::cerr << "Read failed (short read)" << std::endl;
                     continue;
                 }
                 read_failed = false;
@@ -377,7 +377,7 @@ public:
             // Check for read failure
             if (read_failed)
             {
-                //std::cerr << "Read failed (max retries)" << std::endl;
+                // std::cerr << "Read failed (max retries)" << std::endl;
                 free(read_buffer);
                 free(sel);
                 return out;
@@ -406,7 +406,7 @@ public:
                 // Decompress with vidlib 2
                 // read_decomp_buffer_pt = decode_stack_AV1(sizex, sizey, sizez, read_buffer, sel->size);
                 auto decode_result = decode_stack_native(read_buffer, sel->size);
-                
+
                 read_decomp_buffer_pt = std::get<0>(decode_result);
                 decomp_size = std::get<1>(decode_result);
 
@@ -414,10 +414,23 @@ public:
                 height = std::get<1>(std::get<2>(decode_result));
                 depth = std::get<2>(std::get<2>(decode_result));
 
-                read_decomp_buffer = (char *) uint8_to_uint16_crop(read_decomp_buffer_pt, decomp_size, width, height, depth, sizex, sizey, sizez);
-                decomp_size = sizex * sizey * sizez * sizeof(uint16_t);
+                if (std::get<3>(decode_result) == sizeof(uint8_t))
+                {
+                    read_decomp_buffer = (char *)uint8_to_uint16_crop(read_decomp_buffer_pt, decomp_size, width, height, depth, sizex, sizey, sizez);
+                    decomp_size = sizex * sizey * sizez * sizeof(uint16_t);
+                    free(read_decomp_buffer_pt);
+                }
+                else if (std::get<3>(decode_result) == sizeof(uint16_t))
+                {
+                    read_decomp_buffer = (char *)uint16_to_uint16_crop((uint16_t *)read_decomp_buffer_pt, decomp_size, width, height, depth, sizex, sizey, sizez);
+                    decomp_size = sizex * sizey * sizez * sizeof(uint16_t);
+                    free(read_decomp_buffer_pt);
+                }
+                else
+                {
+                    std::cerr << "decode_stack_native returned unexpected pixel size" << std::endl;
+                }
 
-                free(read_decomp_buffer_pt);
                 break;
             }
 
@@ -1256,15 +1269,19 @@ public:
 
                                 bool is_bad = back_mchunks.count({scale, c, chunk_id_x, chunk_id_y, chunk_id_z}) > 0;
 
-                                if(!is_bad) {
+                                if (!is_bad)
+                                {
                                     chunk_reader = get_mchunk(scale, c, chunk_id_x, chunk_id_y, chunk_id_z);
-                                } else {
+                                }
+                                else
+                                {
                                     chunk_reader = nullptr;
                                 }
 
                                 if (chunk_reader == nullptr || chunk_reader == 0)
                                 {
-                                    if(!is_bad) {
+                                    if (!is_bad)
+                                    {
                                         back_mchunks.insert({scale, c, chunk_id_x, chunk_id_y, chunk_id_z});
                                     }
                                     continue;
