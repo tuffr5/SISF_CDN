@@ -28,9 +28,9 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
-          tags: geeklogan/sisf_cdn:latest-amd64
-          cache-from: type=registry,ref=geeklogan/sisf_cdn:buildcache-amd64
-          cache-to: type=registry,ref=geeklogan/sisf_cdn:buildcache-amd64,mode=max
+          tags: tuffr5/sisf_cdn:latest-amd64
+          cache-from: type=registry,ref=tuffr5/sisf_cdn:buildcache-amd64
+          cache-to: type=registry,ref=tuffr5/sisf_cdn:buildcache-amd64,mode=max
 
   build-arm64:
     runs-on: ubuntu-24.04-arm
@@ -55,9 +55,9 @@ jobs:
           context: .
           platforms: linux/arm64
           push: true
-          tags: geeklogan/sisf_cdn:latest-arm64
-          cache-from: type=registry,ref=geeklogan/sisf_cdn:buildcache-arm64
-          cache-to: type=registry,ref=geeklogan/sisf_cdn:buildcache-arm64,mode=max
+          tags: tuffr5/sisf_cdn:latest-arm64
+          cache-from: type=registry,ref=tuffr5/sisf_cdn:buildcache-arm64
+          cache-to: type=registry,ref=tuffr5/sisf_cdn:buildcache-arm64,mode=max
 
   create-manifest:
     runs-on: ubuntu-latest
@@ -71,6 +71,6 @@ jobs:
       
       - name: Create and push manifest
         run: |
-          docker buildx imagetools create -t geeklogan/sisf_cdn:latest \
-            geeklogan/sisf_cdn:latest-amd64 \
-            geeklogan/sisf_cdn:latest-arm64
+          docker buildx imagetools create -t tuffr5/sisf_cdn:latest \
+            tuffr5/sisf_cdn:latest-amd64 \
+            tuffr5/sisf_cdn:latest-arm64
