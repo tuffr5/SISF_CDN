@@ -16,7 +16,7 @@ jobs:
       with:
         submodules: 'true'
     - name: install-depends
-      run: sudo apt install -y build-essential libboost-all-dev libsqlite3-dev libasio-dev nasm cmake
+      run: sudo apt update && sudo apt install -y build-essential libboost-all-dev libsqlite3-dev libasio-dev nasm cmake
     - name: install-ffmpeg
       run: sudo apt install -y ffmpeg libswscale-dev libavutil-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libpostproc-dev libswresample-dev
     - name: install-hdf5
