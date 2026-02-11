@@ -24,10 +24,15 @@
 #include <string>
 #include <string_view>
 #include <map>
+#include <unordered_map>
 #include <set>
 #include <list>
 #include <tuple>
 #include <vector>
+#include <queue>
+#include <thread>
+#include <atomic>
+#include <condition_variable>
 
 #include "counter.hpp"
 
@@ -46,6 +51,197 @@ typedef std::tuple<int, float, float, float, float, int> swc_line_input;
 
 std::unordered_map<std::string, archive_reader *> archive_inventory;
 std::mutex archive_inventory_mutex;
+
+// Forward declaration
+archive_reader *search_inventory(std::string key);
+
+// Downsample for segmentation using non-zero priority mode
+// For each 2x2x2 block: return most frequent non-zero label, or 0 if all zero
+uint16_t* downsample_segmentation_2x(uint16_t* src, size_t src_sx, size_t src_sy, size_t src_sz) {
+	size_t dst_sx = src_sx / 2;
+	size_t dst_sy = src_sy / 2;
+	size_t dst_sz = src_sz / 2;
+
+	if (dst_sx == 0) dst_sx = 1;
+	if (dst_sy == 0) dst_sy = 1;
+	if (dst_sz == 0) dst_sz = 1;
+
+	uint16_t* dst = (uint16_t*)malloc(dst_sx * dst_sy * dst_sz * sizeof(uint16_t));
+
+	const size_t src_stride_y = src_sx;
+	const size_t src_stride_z = src_sx * src_sy;
+
+	for (size_t dz = 0; dz < dst_sz; dz++) {
+		for (size_t dy = 0; dy < dst_sy; dy++) {
+			for (size_t dx = 0; dx < dst_sx; dx++) {
+				size_t base_idx = (dz * 2) * src_stride_z + (dy * 2) * src_stride_y + (dx * 2);
+
+				// Gather 2x2x2 block
+				uint16_t v0 = src[base_idx];
+				uint16_t v1 = src[base_idx + 1];
+				uint16_t v2 = src[base_idx + src_stride_y];
+				uint16_t v3 = src[base_idx + src_stride_y + 1];
+				uint16_t v4 = src[base_idx + src_stride_z];
+				uint16_t v5 = src[base_idx + src_stride_z + 1];
+				uint16_t v6 = src[base_idx + src_stride_z + src_stride_y];
+				uint16_t v7 = src[base_idx + src_stride_z + src_stride_y + 1];
+
+				// Fast path: all zeros (most common)
+				uint16_t any = v0 | v1 | v2 | v3 | v4 | v5 | v6 | v7;
+				if (any == 0) {
+					dst[dz * dst_sy * dst_sx + dy * dst_sx + dx] = 0;
+					continue;
+				}
+
+				// Fast path: single non-zero label
+				uint16_t first = v0 ? v0 : (v1 ? v1 : (v2 ? v2 : (v3 ? v3 : (v4 ? v4 : (v5 ? v5 : (v6 ? v6 : v7))))));
+				if ((v0 == 0 || v0 == first) && (v1 == 0 || v1 == first) &&
+				    (v2 == 0 || v2 == first) && (v3 == 0 || v3 == first) &&
+				    (v4 == 0 || v4 == first) && (v5 == 0 || v5 == first) &&
+				    (v6 == 0 || v6 == first) && (v7 == 0 || v7 == first)) {
+					dst[dz * dst_sy * dst_sx + dy * dst_sx + dx] = first;
+					continue;
+				}
+
+				// Slow path: multiple labels (rare)
+				uint16_t vals[8] = {v0, v1, v2, v3, v4, v5, v6, v7};
+				std::unordered_map<uint16_t, int> counts;
+				for (int i = 0; i < 8; i++) {
+					if (vals[i] != 0) counts[vals[i]]++;
+				}
+				uint16_t result = first;
+				int max_cnt = 0;
+				for (auto& p : counts) {
+					if (p.second > max_cnt) {
+						max_cnt = p.second;
+						result = p.first;
+					}
+				}
+				dst[dz * dst_sy * dst_sx + dy * dst_sx + dx] = result;
+			}
+		}
+	}
+
+	return dst;
+}
+
+// Background propagation for write operations (downsample)
+struct PropagationTask {
+	std::string dataset_id;
+	size_t x_begin, x_end, y_begin, y_end, z_begin, z_end;  // Scale 1 coordinates
+};
+
+std::list<PropagationTask> propagation_queue;  // Use list for efficient merge
+std::mutex propagation_mutex;
+std::condition_variable propagation_cv;
+std::atomic<bool> propagation_running{true};
+
+// Check if two regions overlap
+bool regions_overlap(const PropagationTask& a, const PropagationTask& b) {
+	if (a.dataset_id != b.dataset_id) return false;
+	bool x_overlap = a.x_begin < b.x_end && b.x_begin < a.x_end;
+	bool y_overlap = a.y_begin < b.y_end && b.y_begin < a.y_end;
+	bool z_overlap = a.z_begin < b.z_end && b.z_begin < a.z_end;
+	return x_overlap && y_overlap && z_overlap;
+}
+
+// Merge two tasks into one (union bounding box)
+PropagationTask merge_tasks(const PropagationTask& a, const PropagationTask& b) {
+	return {
+		a.dataset_id,
+		std::min(a.x_begin, b.x_begin), std::max(a.x_end, b.x_end),
+		std::min(a.y_begin, b.y_begin), std::max(a.y_end, b.y_end),
+		std::min(a.z_begin, b.z_begin), std::max(a.z_end, b.z_end)
+	};
+}
+
+// Add task to queue, merging with overlapping tasks
+void queue_propagation_task(PropagationTask task) {
+	std::lock_guard<std::mutex> lock(propagation_mutex);
+
+	// Try to merge with existing tasks
+	for (auto it = propagation_queue.begin(); it != propagation_queue.end(); ) {
+		if (regions_overlap(*it, task)) {
+			task = merge_tasks(*it, task);
+			it = propagation_queue.erase(it);
+		} else {
+			++it;
+		}
+	}
+
+	propagation_queue.push_back(task);
+	propagation_cv.notify_one();
+}
+
+void propagation_worker() {
+	while (propagation_running) {
+		PropagationTask task;
+		{
+			std::unique_lock<std::mutex> lock(propagation_mutex);
+			propagation_cv.wait(lock, [] { return !propagation_queue.empty() || !propagation_running; });
+			if (!propagation_running && propagation_queue.empty()) break;
+			task = propagation_queue.front();
+			propagation_queue.pop_front();
+		}
+
+		archive_reader *reader = search_inventory(task.dataset_id);
+		if (reader == nullptr) continue;
+
+		// Coordinates are at scale 1
+		const size_t s1_x0 = task.x_begin, s1_x1 = task.x_end;
+		const size_t s1_y0 = task.y_begin, s1_y1 = task.y_end;
+		const size_t s1_z0 = task.z_begin, s1_z1 = task.z_end;
+
+		CROW_LOG_INFO << "[PROPAGATE] " << task.dataset_id
+			<< " region=[" << s1_x0 << "-" << s1_x1 << ", " << s1_y0 << "-" << s1_y1 << ", " << s1_z0 << "-" << s1_z1 << "]";
+
+		// Sort scales (ascending: 1, 2, 4, 8, ...)
+		std::vector<size_t> sorted_scales(reader->scales.begin(), reader->scales.end());
+		std::sort(sorted_scales.begin(), sorted_scales.end());
+
+		// CASCADE DOWNSAMPLE: 1 → 2 → 4 → 8 (each scale from previous)
+		for (size_t i = 1; i < sorted_scales.size(); i++) {
+			size_t src_scale = sorted_scales[i - 1];  // Source: previous scale
+			size_t dst_scale = sorted_scales[i];      // Destination: current scale
+
+			// Calculate destination region at dst_scale (in scale 1 coords)
+			size_t ds_x0 = s1_x0 / dst_scale, ds_x1 = (s1_x1 + dst_scale - 1) / dst_scale;
+			size_t ds_y0 = s1_y0 / dst_scale, ds_y1 = (s1_y1 + dst_scale - 1) / dst_scale;
+			size_t ds_z0 = s1_z0 / dst_scale, ds_z1 = (s1_z1 + dst_scale - 1) / dst_scale;
+
+			size_t ds_sx = ds_x1 - ds_x0;
+			size_t ds_sy = ds_y1 - ds_y0;
+			size_t ds_sz = ds_z1 - ds_z0;
+
+			if (ds_sx == 0 || ds_sy == 0 || ds_sz == 0) continue;
+
+			// Calculate source region at src_scale
+			size_t ratio = dst_scale / src_scale;  // Always 2 for power-of-2 scales
+			size_t src_x0 = ds_x0 * ratio, src_x1 = ds_x1 * ratio;
+			size_t src_y0 = ds_y0 * ratio, src_y1 = ds_y1 * ratio;
+			size_t src_z0 = ds_z0 * ratio, src_z1 = ds_z1 * ratio;
+
+			size_t src_sx = src_x1 - src_x0;
+			size_t src_sy = src_y1 - src_y0;
+			size_t src_sz = src_z1 - src_z0;
+
+			// Load from source scale (previous scale, smaller data)
+			uint16_t *src_data = reader->load_region(src_scale, src_x0, src_x1, src_y0, src_y1, src_z0, src_z1);
+			if (src_data == nullptr) continue;
+
+			// Downsample 2x using non-zero priority mode (preserves labels)
+			uint16_t *ds_data = downsample_segmentation_2x(src_data, src_sx, src_sy, src_sz);
+
+			reader->replace_region(dst_scale, ds_x0, ds_x1, ds_y0, ds_y1, ds_z0, ds_z1, (const char *)ds_data);
+			free(src_data);
+			free(ds_data);
+
+			CROW_LOG_DEBUG << "[PROPAGATE] scale " << src_scale << " → " << dst_scale;
+		}
+	}
+}
+
+std::thread propagation_thread;
 
 void load_inventory()
 {
@@ -236,6 +432,10 @@ int main(int argc, char *argv[])
 	}
 
 	load_inventory();
+
+	// Start background propagation worker thread
+	propagation_thread = std::thread(propagation_worker);
+	std::cout << "Started background propagation worker." << std::endl;
 
 	// Create App with CORS enabled
 	crow::App<crow::CORSHandler, CounterMiddleware> app;
@@ -745,111 +945,89 @@ int main(int argc, char *argv[])
 
 		res.end(out.str()); });
 
-	// @app.route("/data/<data_id>/<resolution>/<key>-<key>-<key>")
+	// Write endpoint - writes at any scale, background propagates to all other scales
 	CROW_ROUTE(app, "/<string>/write/<string>/<string>").methods(crow::HTTPMethod::PATCH)([](crow::request &req, crow::response &res, std::string data_id_in, std::string resolution_id, std::string tile_key)
-																						  {
-		// std::string, std::vector<std::pair<std::string, std::string>>
+	{
 		auto [data_id, filters] = parse_filter_list(data_id_in);
 		archive_reader *reader = search_inventory(data_id);
 
-		if (reader == nullptr)
-		{
+		if (reader == nullptr) {
 			res.code = crow::status::NOT_FOUND;
 			res.end("404 Not Found\n");
 			return;
 		}
 
-		if(!(reader->type == ArchiveType::SISF))
-		{
+		if (!(reader->type == ArchiveType::SISF)) {
 			res.code = crow::status::FORBIDDEN;
-			res.end("403 Forbidden\n");
+			res.end("403 Forbidden -- SISF only\n");
 			return;
 		}
 
-		if(reader->channel_count != 1)
-		{
+		if (reader->channel_count != 1) {
 			res.code = crow::status::FORBIDDEN;
-			res.end("403 Forbidden\n");
+			res.end("403 Forbidden -- Single channel only\n");
 			return;
 		}
 
-		if (!reader->verify_protection(filters) || !reader->is_protected || READ_ONLY_MODE)
-		{
+		if (!reader->verify_protection(filters) || !reader->is_protected || READ_ONLY_MODE) {
 			res.code = crow::status::FORBIDDEN;
 			res.end("403 Forbidden\n");
 			return;
 		}
 
 		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
-		// <xBegin>-<xEnd>_<yBegin>-<yEnd>_<zBegin>-<zEnd>
-		if (sscanf(tile_key.c_str(), "%u-%u_%u-%u_%u-%u", &x_begin, &x_end, &y_begin, &y_end, &z_begin, &z_end) != 6)
-		{
+		if (sscanf(tile_key.c_str(), "%u-%u_%u-%u_%u-%u", &x_begin, &x_end, &y_begin, &y_end, &z_begin, &z_end) != 6) {
 			res.code = crow::status::BAD_REQUEST;
 			res.end("400 Bad Request -- Invalid range string\n");
 			return;
 		}
 
 		size_t scale;
-		try
-		{
+		try {
 			scale = std::stoi(resolution_id);
-		}
-		catch (const std::invalid_argument &e)
-		{
-			scale = 0;
-		}
-		catch (const std::out_of_range &e)
-		{
+		} catch (...) {
 			scale = 0;
 		}
 
-		// if (scale == 0)
-		if (scale != 1)
-		{
+		// Only scale 1 is allowed - frontend must always provide scale 1 coordinates
+		if (scale != 1) {
 			res.code = crow::status::BAD_REQUEST;
-			res.end("400 Bad Request -- Invalid scale string\n");
+			res.end("400 Bad Request -- Only scale 1 is supported for writes\n");
 			return;
 		}
 
-		// size_t scale = stoi(resolution_id);
-		size_t chunk_sizes[3] = {x_end - x_begin, y_end - y_begin, z_end - z_begin};
-		std::tuple<size_t, size_t, size_t> image_size = reader->get_size(scale);
+		const size_t sx = x_end - x_begin;
+		const size_t sy = y_end - y_begin;
+		const size_t sz = z_end - z_begin;
+		std::tuple<size_t, size_t, size_t> image_size = reader->get_size(1);  // Always check against scale 1
 
-		{
-			bool out_of_range = false;
-			if (!reader->contains_scale(scale))
-			{
-				out_of_range = true;
-			}
-			else
-			{
-				out_of_range |= x_end > std::get<0>(image_size);
-				out_of_range |= y_end > std::get<1>(image_size);
-				out_of_range |= z_end > std::get<2>(image_size);
-			}
+		bool out_of_range = x_end > std::get<0>(image_size) ||
+			y_end > std::get<1>(image_size) ||
+			z_end > std::get<2>(image_size);
 
-			if (out_of_range)
-			{
-				res.code = crow::status::BAD_REQUEST;
-				res.end("400 Bad Request -- Invalid data range\n");
-				return;
-			}
+		if (out_of_range) {
+			res.code = crow::status::BAD_REQUEST;
+			res.end("400 Bad Request -- Invalid data range\n");
+			return;
 		}
 
-		size_t size_of_insert = chunk_sizes[0] * chunk_sizes[1] * chunk_sizes[2] * sizeof(uint16_t);
-
+		size_t size_of_insert = sx * sy * sz * sizeof(uint16_t);
 		std::string insert = req.body;
 
-		if(insert.size() != size_of_insert)
-		{
+		if (insert.size() != size_of_insert) {
 			res.code = crow::status::BAD_REQUEST;
 			res.end("400 Bad Request -- Invalid insert size\n");
 			return;
 		}
 
-		reader->replace_region(
-			1, x_begin, x_end, y_begin, y_end, z_begin, z_end, insert.c_str()
-		);
+		// Write to scale 1 (source of truth)
+		reader->replace_region(1, x_begin, x_end, y_begin, y_end, z_begin, z_end, insert.c_str());
+
+		CROW_LOG_INFO << "[PATCH] Wrote to scale 1: [" << x_begin << "-" << x_end << ", "
+			<< y_begin << "-" << y_end << ", " << z_begin << "-" << z_end << "]";
+
+		// Queue background downsampling (merges with overlapping tasks)
+		queue_propagation_task({data_id, x_begin, x_end, y_begin, y_end, z_begin, z_end});
 
 		res.code = crow::status::OK;
 		res.body = "done.";
@@ -1847,6 +2025,158 @@ int main(int argc, char *argv[])
 		
 		res.end(); });
 
+	// Streaming endpoint - streams data in Z-slabs, supports HTTP Range requests
+	CROW_ROUTE(app, "/<string>/stream/<string>/<string>")
+	([](const crow::request &req, crow::response &res, std::string data_id_in, std::string resolution_id, std::string tile_key)
+	 {
+		auto begin = now();
+
+		CROW_LOG_INFO << "[STREAM] Request: " << data_id_in << " scale=" << resolution_id << " range=" << tile_key;
+
+		auto [data_id, filters] = parse_filter_list(data_id_in);
+		archive_reader *reader = search_inventory(data_id);
+
+		if (reader == nullptr) {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found\n");
+			return;
+		}
+
+		// Read operations are public - no token check needed
+
+		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
+		if (sscanf(tile_key.c_str(), "%u-%u_%u-%u_%u-%u", &x_begin, &x_end, &y_begin, &y_end, &z_begin, &z_end) != 6) {
+			res.code = crow::status::BAD_REQUEST;
+			res.end("400 Bad Request -- Invalid range string\n");
+			return;
+		}
+
+		size_t scale;
+		try {
+			scale = std::stoi(resolution_id);
+		} catch (...) {
+			scale = 0;
+		}
+
+		if (scale == 0) {
+			res.code = crow::status::BAD_REQUEST;
+			res.end("400 Bad Request -- Invalid scale string\n");
+			return;
+		}
+
+		const size_t sx = x_end - x_begin;
+		const size_t sy = y_end - y_begin;
+		const size_t sz = z_end - z_begin;
+		std::tuple<size_t, size_t, size_t> image_size = reader->get_size(scale);
+
+		bool out_of_range = !reader->contains_scale(scale) ||
+			x_end > std::get<0>(image_size) ||
+			y_end > std::get<1>(image_size) ||
+			z_end > std::get<2>(image_size);
+
+		if (out_of_range) {
+			res.code = crow::status::BAD_REQUEST;
+			res.end("400 Bad Request -- Invalid data range\n");
+			return;
+		}
+
+		// Get slab size from sub-chunk Z-size
+		size_t slab_size = sz;
+		packed_reader *pr = reader->get_mchunk(scale, 0, 0, 0, 0);
+		if (pr != nullptr) {
+			slab_size = std::min((size_t)pr->chunkz, sz);
+		}
+		if (slab_size < 1) slab_size = 1;
+
+		const size_t total_size = sizeof(uint16_t) * sx * sy * sz * reader->channel_count;
+
+		// Parse Range header
+		size_t range_start = 0;
+		size_t range_end = total_size - 1;
+		bool has_range = false;
+
+		std::string range_header = req.get_header_value("Range");
+		if (!range_header.empty()) {
+			// Parse "bytes=START-END" or "bytes=START-"
+			size_t rs, re;
+			if (sscanf(range_header.c_str(), "bytes=%zu-%zu", &rs, &re) == 2) {
+				range_start = rs;
+				range_end = std::min(re, total_size - 1);
+				has_range = true;
+			} else if (sscanf(range_header.c_str(), "bytes=%zu-", &rs) == 1) {
+				range_start = rs;
+				has_range = true;
+			}
+
+			if (range_start >= total_size) {
+				res.code = 416; // Range Not Satisfiable
+				res.set_header("Content-Range", "bytes */" + std::to_string(total_size));
+				res.end();
+				return;
+			}
+		}
+
+		const size_t content_length = range_end - range_start + 1;
+
+		CROW_LOG_INFO << "[STREAM] total_size=" << total_size << " slab_size=" << slab_size
+			<< " range=" << range_start << "-" << range_end << " has_range=" << has_range;
+
+		res.set_header("Content-Type", "application/octet-stream");
+		res.set_header("Accept-Ranges", "bytes");
+
+		if (has_range) {
+			res.code = 206; // Partial Content
+			res.set_header("Content-Range", "bytes " + std::to_string(range_start) + "-" +
+				std::to_string(range_end) + "/" + std::to_string(total_size));
+		}
+		res.set_header("Content-Length", std::to_string(content_length));
+
+		// Stream data, respecting byte range
+		size_t bytes_written = 0;
+		size_t current_byte_offset = 0;
+
+		for (size_t zs = z_begin; zs < z_end && bytes_written < content_length; zs += slab_size) {
+			size_t ze = std::min(zs + slab_size, (size_t)z_end);
+			size_t slab_sz = ze - zs;
+			const size_t slab_bytes = sizeof(uint16_t) * sx * sy * slab_sz * reader->channel_count;
+
+			// Skip slabs entirely before range_start
+			if (current_byte_offset + slab_bytes <= range_start) {
+				current_byte_offset += slab_bytes;
+				continue;
+			}
+
+			uint16_t *buf = reader->load_region(scale, x_begin, x_end, y_begin, y_end, zs, ze);
+			if (buf == nullptr) break;
+
+			for (const auto &f : filters) {
+				filter_run(buf, slab_bytes, {sx, sy, slab_sz}, reader->channel_count, f.first, f.second);
+			}
+
+			// Calculate which portion of this slab to send
+			size_t slab_start = 0;
+			size_t slab_end = slab_bytes;
+
+			if (current_byte_offset < range_start) {
+				slab_start = range_start - current_byte_offset;
+			}
+			if (current_byte_offset + slab_bytes > range_end + 1) {
+				slab_end = range_end + 1 - current_byte_offset;
+			}
+
+			size_t to_write = slab_end - slab_start;
+			res.write(std::string((char *)buf + slab_start, to_write));
+			bytes_written += to_write;
+			current_byte_offset += slab_bytes;
+			free(buf);
+		}
+
+		CROW_LOG_INFO << "[STREAM] Complete: " << data_id << " bytes_sent=" << bytes_written
+			<< " time_us=" << calculate_dt(begin);
+
+		res.end();
+		log_time(data_id, "STREAM", scale, sx, sy, sz, begin); });
+
 	// @app.route("/data/<data_id>/<resolution>/<key>-<key>-<key>")
 	// This has to be last in the route list because it acts as a wildcard
 	CROW_ROUTE(app, "/<string>/<string>/<string>")
@@ -1864,11 +2194,7 @@ int main(int argc, char *argv[])
 			return;
 		}
 
-		if(!reader->verify_protection(filters)) {
-			res.code = crow::status::FORBIDDEN;
-			res.end("403 Forbidden\n");
-			return;
-		}
+		// Read operations are public - no token check needed
 
 		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
 		// <xBegin>-<xEnd>_<yBegin>-<yEnd>_<zBegin>-<zEnd>
@@ -2172,5 +2498,12 @@ int main(int argc, char *argv[])
 			.loglevel(crow::LogLevel::Warning)
 			.timeout(5)
 			.run();
+	}
+
+	// Cleanup propagation worker
+	propagation_running = false;
+	propagation_cv.notify_all();
+	if (propagation_thread.joinable()) {
+		propagation_thread.join();
 	}
 }
