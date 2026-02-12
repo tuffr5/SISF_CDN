@@ -3,6 +3,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -13,8 +18,10 @@
 #include <queue>
 #include <deque>
 #include <mutex>
+#include <future>
 #include <map>
 #include <chrono>
+#include <set>
 
 #include <nlohmann/json.hpp>
 
@@ -84,7 +91,7 @@ using json = nlohmann::json;
 std::chrono::duration cache_lock_timeout = std::chrono::milliseconds(10);
 
 std::timed_mutex global_chunk_cache_mutex;
-size_t global_cache_size = 100;
+size_t global_cache_size = 1000;
 global_chunk_line *global_chunk_cache = (global_chunk_line *)calloc(global_cache_size, sizeof(global_chunk_line));
 size_t global_chunk_cache_last = 0;
 
@@ -160,6 +167,11 @@ public:
 
     std::string meta_fname, data_fname;
 
+    // mmap for data file - eliminates file open/close overhead
+    void *mmap_data_ptr = nullptr;
+    size_t mmap_data_size = 0;
+    int mmap_data_fd = -1;
+
     packed_reader(size_t chunk_id, std::string metadata_fname_in, std::string data_fname_in)
     {
         is_valid = false;
@@ -226,11 +238,98 @@ public:
 
         max_chunk_size = channel_count * chunkx * chunky * chunkz * sizeof(uint16_t);
 
+        // Set up mmap for data file
+        mmap_data_fd = open(data_fname.c_str(), O_RDONLY);
+        if (mmap_data_fd != -1)
+        {
+            struct stat st;
+            if (fstat(mmap_data_fd, &st) == 0)
+            {
+                mmap_data_size = st.st_size;
+                mmap_data_ptr = mmap(nullptr, mmap_data_size, PROT_READ, MAP_PRIVATE, mmap_data_fd, 0);
+                if (mmap_data_ptr == MAP_FAILED)
+                {
+                    std::cerr << "mmap failed for data file, falling back to ifstream" << std::endl;
+                    mmap_data_ptr = nullptr;
+                    close(mmap_data_fd);
+                    mmap_data_fd = -1;
+                }
+                else
+                {
+                    // Advise kernel for random access pattern
+                    madvise(mmap_data_ptr, mmap_data_size, MADV_RANDOM);
+                }
+            }
+            else
+            {
+                close(mmap_data_fd);
+                mmap_data_fd = -1;
+            }
+        }
+
         is_valid = true;
     }
 
     ~packed_reader()
     {
+        // Clean up mmap
+        if (mmap_data_ptr != nullptr && mmap_data_ptr != MAP_FAILED)
+        {
+            munmap(mmap_data_ptr, mmap_data_size);
+        }
+        if (mmap_data_fd != -1)
+        {
+            close(mmap_data_fd);
+        }
+    }
+
+    // Call this after data file is updated (e.g., after patch endpoint)
+    // Thread-safe: blocks reads briefly during remap
+    std::mutex mmap_refresh_mutex;
+
+    void refresh_mmap()
+    {
+        std::lock_guard<std::mutex> lock(mmap_refresh_mutex);
+
+        // Unmap old mapping
+        if (mmap_data_ptr != nullptr && mmap_data_ptr != MAP_FAILED)
+        {
+            munmap(mmap_data_ptr, mmap_data_size);
+            mmap_data_ptr = nullptr;
+        }
+        if (mmap_data_fd != -1)
+        {
+            close(mmap_data_fd);
+            mmap_data_fd = -1;
+        }
+
+        // Remap the file (may have new size)
+        mmap_data_fd = open(data_fname.c_str(), O_RDONLY);
+        if (mmap_data_fd != -1)
+        {
+            struct stat st;
+            if (fstat(mmap_data_fd, &st) == 0)
+            {
+                mmap_data_size = st.st_size;
+                mmap_data_ptr = mmap(nullptr, mmap_data_size, PROT_READ, MAP_PRIVATE, mmap_data_fd, 0);
+                if (mmap_data_ptr == MAP_FAILED)
+                {
+                    std::cerr << "mmap refresh failed, falling back to ifstream" << std::endl;
+                    mmap_data_ptr = nullptr;
+                    close(mmap_data_fd);
+                    mmap_data_fd = -1;
+                }
+                else
+                {
+                    madvise(mmap_data_ptr, mmap_data_size, MADV_RANDOM);
+                }
+            }
+            else
+            {
+                close(mmap_data_fd);
+                mmap_data_fd = -1;
+            }
+        }
     }
 
     size_t find_index(size_t x, size_t y, size_t z)
@@ -304,8 +403,25 @@ public:
     std::mutex chunk_cache_mutex;
     std::deque<std::tuple<size_t, uint16_t *>> chunk_cache;
 
+    // Benchmark stats for load_chunk (accumulated per load_region call)
+    mutable size_t bench_chunk_cache_hits = 0;
+    mutable size_t bench_chunk_cache_misses = 0;
+    mutable size_t bench_chunk_io_us = 0;
+    mutable size_t bench_chunk_decomp_us = 0;
+    mutable size_t bench_chunk_cache_us = 0;
+
+    void reset_chunk_bench() const {
+        bench_chunk_cache_hits = 0;
+        bench_chunk_cache_misses = 0;
+        bench_chunk_io_us = 0;
+        bench_chunk_decomp_us = 0;
+        bench_chunk_cache_us = 0;
+    }
+
     uint16_t *load_chunk(size_t id, size_t sizex, size_t sizey, size_t sizez)
     {
+        auto bench_start = std::chrono::steady_clock::now();
+
         const size_t out_buffer_size = sizex * sizey * sizez * sizeof(uint16_t);
         uint16_t *out = (uint16_t *)calloc(out_buffer_size, 1);
         metadata_entry *sel = load_meta_entry(id);
@@ -319,6 +435,7 @@ public:
 
         uint16_t *from_cache = 0;
 
+        auto cache_start = std::chrono::steady_clock::now();
         if (global_chunk_cache_mutex.try_lock_for(cache_lock_timeout))
         {
             for (size_t i = 0; i < global_cache_size; i++)
@@ -337,42 +454,66 @@ public:
             if (from_cache != 0)
             {
                 memcpy((void *)out, (void *)from_cache, out_buffer_size);
+                bench_chunk_cache_hits++;
             }
 
             global_chunk_cache_mutex.unlock();
         }
+        bench_chunk_cache_us += std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - cache_start).count();
 
         // Either from_cache has the chunk, or was not in cache, or failed to get lock
 
         if (from_cache == 0)
         {
-            // Read from file
+            bench_chunk_cache_misses++;
+
+            // Read from file (use mmap if available, fallback to ifstream)
+            auto io_start = std::chrono::steady_clock::now();
             size_t buffer_size = sel->size;
             uint16_t *read_buffer = (uint16_t *)malloc(buffer_size);
 
             bool read_failed = true;
-            for (size_t i = 0; i < IO_RETRY_COUNT; i++)
+
+            // Try mmap first (much faster - no syscall per read)
+            // Lock briefly to prevent reading during refresh_mmap()
             {
-                std::ifstream file(data_fname, std::ios::in | std::ios::binary);
-
-                if (file.fail())
+                std::lock_guard<std::mutex> lock(mmap_refresh_mutex);
+                if (mmap_data_ptr != nullptr && sel->offset + sel->size <= mmap_data_size)
                 {
-                    // std::cerr << "Fopen failed" << std::endl;
-                    continue;
+                    memcpy(read_buffer, (char *)mmap_data_ptr + sel->offset, sel->size);
+                    read_failed = false;
                 }
-
-                file.seekg(sel->offset);
-                file.read((char *)read_buffer, sel->size);
-                std::streamsize bytes_read = file.gcount();
-                file.close();
-                if (bytes_read != sel->size)
-                {
-                    // std::cerr << "Read failed (short read)" << std::endl;
-                    continue;
-                }
-                read_failed = false;
-                break;
             }
+
+            // Fallback to ifstream if mmap not available or failed
+            if (read_failed)
+            {
+                for (size_t i = 0; i < IO_RETRY_COUNT; i++)
+                {
+                    std::ifstream file(data_fname, std::ios::in | std::ios::binary);
+
+                    if (file.fail())
+                    {
+                        // std::cerr << "Fopen failed" << std::endl;
+                        continue;
+                    }
+
+                    file.seekg(sel->offset);
+                    file.read((char *)read_buffer, sel->size);
+                    std::streamsize bytes_read = file.gcount();
+                    file.close();
+                    if (bytes_read != sel->size)
+                    {
+                        // std::cerr << "Read failed (short read)" << std::endl;
+                        continue;
+                    }
+                    read_failed = false;
+                    break;
+                }
+            }
+            bench_chunk_io_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - io_start).count();
 
             // Check for read failure
             if (read_failed)
@@ -384,6 +525,7 @@ public:
             }
 
             // Decompress
+            auto decomp_start = std::chrono::steady_clock::now();
             size_t decomp_size;
             char *read_decomp_buffer;
             pixtype *read_decomp_buffer_pt;
@@ -433,6 +575,8 @@ public:
 
                 break;
             }
+            bench_chunk_decomp_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - decomp_start).count();
 
             free(read_buffer);
 
@@ -528,6 +672,9 @@ public:
         }
 
         free(compressed_data);
+
+        // Refresh mmap to see the new data (file has grown)
+        refresh_mmap();
     }
 
     uint16_t read_pixel(size_t i, size_t j, size_t k)
@@ -1199,6 +1346,15 @@ public:
     {
         std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
 
+        // Benchmark timing variables
+        size_t bench_get_mchunk_us = 0;
+        size_t bench_load_chunk_us = 0;
+        size_t bench_voxel_copy_us = 0;
+        size_t bench_local_cache_us = 0;
+        size_t bench_chunk_loads = 0;
+        size_t bench_local_cache_hits = 0;
+        size_t bench_voxel_count = 0;
+
         // Calculate size of output
         const size_t osizex = xe - xs;
         const size_t osizey = ye - ys;
@@ -1235,11 +1391,11 @@ public:
             {
                 for (size_t i = xs; i < xe; i++)
                 {
-                    const size_t xmin = mcx * (i / mcx);                             // lower bound of mchunk
-                    const size_t xmax = std::min((size_t)xmin + mcx, (size_t)sizex); // upper bound of mchunk
-                    const size_t xsize = xmax - xmin;                                // size of mchunk
-                    const size_t chunk_id_x = i / ((size_t)mcx);                     // mchunk x id
-                    const size_t x_in_chunk = i - xmin;                              // x displacement inside chunk
+                    const size_t xmin = mcx * (i / mcx);
+                    const size_t xmax = std::min((size_t)xmin + mcx, (size_t)sizex);
+                    const size_t xsize = xmax - xmin;
+                    const size_t chunk_id_x = i / ((size_t)mcx);
+                    const size_t x_in_chunk = i - xmin;
 
                     for (size_t j = ys; j < ye; j++)
                     {
@@ -1271,7 +1427,10 @@ public:
 
                                 if (!is_bad)
                                 {
+                                    auto mchunk_start = std::chrono::steady_clock::now();
                                     chunk_reader = get_mchunk(scale, c, chunk_id_x, chunk_id_y, chunk_id_z);
+                                    bench_get_mchunk_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now() - mchunk_start).count();
                                 }
                                 else
                                 {
@@ -1312,9 +1471,9 @@ public:
                                 chunk_identifier = new std::tuple(c, chunk_id_x, chunk_id_y, chunk_id_z, sub_chunk_id);
 
                                 // Find the start/stop coordinates of this chunk
-                                cxmin = ((size_t)chunk_reader->chunkx) * (x_in_chunk_offset / ((size_t)chunk_reader->chunkx)); // Minimum value of the chunk
-                                cxmax = std::min((size_t)cxmin + chunk_reader->chunkx, (size_t)chunk_reader->sizex);           // Maximum value of the chunk
-                                cxsize = cxmax - cxmin;                                                                        // Size of the chunk
+                                cxmin = ((size_t)chunk_reader->chunkx) * (x_in_chunk_offset / ((size_t)chunk_reader->chunkx));
+                                cxmax = std::min((size_t)cxmin + chunk_reader->chunkx, (size_t)chunk_reader->sizex);
+                                cxsize = cxmax - cxmin;
 
                                 cymin = ((size_t)chunk_reader->chunky) * (y_in_chunk_offset / ((size_t)chunk_reader->chunky));
                                 cymax = std::min((size_t)cymin + chunk_reader->chunky, (size_t)chunk_reader->sizey);
@@ -1324,12 +1483,24 @@ public:
                                 czmax = std::min((size_t)czmin + chunk_reader->chunkz, (size_t)chunk_reader->sizez);
                                 czsize = czmax - czmin;
 
-                                // Check if the chunk is in the tmp cache
+                                // Check if the chunk is in the local cache
+                                auto local_cache_start = std::chrono::steady_clock::now();
                                 chunk = chunk_cache[*chunk_identifier];
+                                bench_local_cache_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - local_cache_start).count();
+
                                 if (chunk == 0)
                                 {
+                                    auto load_start = std::chrono::steady_clock::now();
                                     chunk = chunk_reader->load_chunk(sub_chunk_id, cxsize, cysize, czsize);
+                                    bench_load_chunk_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now() - load_start).count();
                                     chunk_cache[*chunk_identifier] = chunk;
+                                    bench_chunk_loads++;
+                                }
+                                else
+                                {
+                                    bench_local_cache_hits++;
                                 }
 
                                 // Store this ID as the most recent chunk
@@ -1338,16 +1509,20 @@ public:
                             }
 
                             // Calculate the coordinates of the input and output inside their respective buffers
-                            const size_t coffset = ((x_in_chunk_offset - cxmin) * cysize * czsize) + // X
-                                                   ((y_in_chunk_offset - cymin) * czsize) +          // Y
-                                                   (z_in_chunk_offset - czmin);                      // Z
+                            auto copy_start = std::chrono::steady_clock::now();
+                            const size_t coffset = ((x_in_chunk_offset - cxmin) * cysize * czsize) +
+                                                   ((y_in_chunk_offset - cymin) * czsize) +
+                                                   (z_in_chunk_offset - czmin);
 
-                            const size_t ooffset = (c * osizey * osizex * osizez) + // C
-                                                   ((k - zs) * osizey * osizex) +   // Z
-                                                   ((j - ys) * osizex) +            // Y
-                                                   ((i - xs));                      // X
+                            const size_t ooffset = (c * osizey * osizex * osizez) +
+                                                   ((k - zs) * osizey * osizex) +
+                                                   ((j - ys) * osizex) +
+                                                   ((i - xs));
 
                             out_buffer[ooffset] = chunk[coffset];
+                            bench_voxel_copy_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - copy_start).count();
+                            bench_voxel_count++;
                         }
                     }
                 }
@@ -1357,6 +1532,32 @@ public:
             {
                 delete chunk_identifier;
             }
+
+            // Aggregate chunk-level stats from the last chunk_reader
+            size_t total_cache_hits = 0, total_cache_misses = 0;
+            size_t total_io_us = 0, total_decomp_us = 0, total_chunk_cache_us = 0;
+            if (chunk_reader != nullptr) {
+                total_cache_hits = chunk_reader->bench_chunk_cache_hits;
+                total_cache_misses = chunk_reader->bench_chunk_cache_misses;
+                total_io_us = chunk_reader->bench_chunk_io_us;
+                total_decomp_us = chunk_reader->bench_chunk_decomp_us;
+                total_chunk_cache_us = chunk_reader->bench_chunk_cache_us;
+            }
+
+            // Log benchmark results
+            auto total_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - begin).count();
+
+            CROW_LOG_DEBUG << "[BENCH load_region] "
+                << "region=" << osizex << "x" << osizey << "x" << osizez << " "
+                << "total=" << total_us << "us | "
+                << "get_mchunk=" << bench_get_mchunk_us << "us | "
+                << "load_chunk=" << bench_load_chunk_us << "us (n=" << bench_chunk_loads << ") | "
+                << "local_cache=" << bench_local_cache_us << "us (hits=" << bench_local_cache_hits << ") | "
+                << "voxel_copy=" << bench_voxel_copy_us << "us (n=" << bench_voxel_count << ") | "
+                << "chunk_io=" << total_io_us << "us | "
+                << "chunk_decomp=" << total_decomp_us << "us | "
+                << "chunk_cache=" << total_chunk_cache_us << "us (hits=" << total_cache_hits << " misses=" << total_cache_misses << ")";
 
             for (auto it = chunk_cache.begin(); it != chunk_cache.end(); it++)
             {
@@ -1719,3 +1920,256 @@ public:
         }
     }
 };
+
+// Projection function enum
+enum ProjectFunction { PROJECT_NONE = 0, PROJECT_MAX, PROJECT_MIN, PROJECT_AVG };
+
+// Parallel load_region wrapper - loads region using chunk-aligned parallel tiles
+// Falls back to sequential load_region for small regions
+// Optional projection: if project_frames > 0, computes projection along project_axis
+inline uint16_t* parallel_load_region(archive_reader* reader, int scale,
+    size_t x_begin, size_t x_end, size_t y_begin, size_t y_end, size_t z_begin, size_t z_end,
+    ProjectFunction project_mode = PROJECT_NONE, char project_axis = 'z', size_t project_frames = 0,
+    size_t max_parallel_tiles = 4) {
+
+    const size_t sx = x_end - x_begin;
+    const size_t sy = y_end - y_begin;
+    const size_t sz = z_end - z_begin;
+    const size_t channel_count = reader->channel_count;
+
+    // Get compression chunk sizes from packed_reader
+    size_t tile_x = sx, tile_y = sy, tile_z = sz;
+    packed_reader *pr = reader->get_mchunk(scale, 0, 0, 0, 0);
+    if (pr != nullptr) {
+        tile_x = pr->chunkx;
+        tile_y = pr->chunky;
+        tile_z = pr->chunkz;
+    }
+
+    // No projection case
+    if (project_mode == PROJECT_NONE || project_frames < 1) {
+        // If region fits in one chunk, use direct load
+        if (sx <= tile_x && sy <= tile_y && sz <= tile_z) {
+            return reader->load_region(scale, x_begin, x_end, y_begin, y_end, z_begin, z_end);
+        }
+
+        // Allocate output buffer
+        const size_t out_size = sx * sy * sz * channel_count * sizeof(uint16_t);
+        uint16_t* out_buffer = (uint16_t*)malloc(out_size);
+        if (out_buffer == nullptr) return nullptr;
+
+        // Build list of chunk-aligned tiles
+        struct TileReq { size_t xs, xe, ys, ye, zs, ze; };
+        std::vector<TileReq> tile_reqs;
+
+        for (size_t tzs = z_begin; tzs < z_end; tzs += tile_z) {
+            size_t tze = std::min(tzs + tile_z, z_end);
+            for (size_t tys = y_begin; tys < y_end; tys += tile_y) {
+                size_t tye = std::min(tys + tile_y, y_end);
+                for (size_t txs = x_begin; txs < x_end; txs += tile_x) {
+                    size_t txe = std::min(txs + tile_x, x_end);
+                    tile_reqs.push_back({txs, txe, tys, tye, tzs, tze});
+                }
+            }
+        }
+
+        for (size_t batch_start = 0; batch_start < tile_reqs.size(); batch_start += max_parallel_tiles) {
+            size_t batch_end = std::min(batch_start + max_parallel_tiles, tile_reqs.size());
+
+            std::vector<std::future<std::pair<size_t, uint16_t*>>> futures;
+            futures.reserve(batch_end - batch_start);
+
+            for (size_t i = batch_start; i < batch_end; i++) {
+                TileReq req = tile_reqs[i];
+                futures.push_back(std::async(std::launch::async, [reader, scale, req, i]() {
+                    uint16_t* tile_buf = reader->load_region(scale, req.xs, req.xe, req.ys, req.ye, req.zs, req.ze);
+                    return std::make_pair(i, tile_buf);
+                }));
+            }
+
+            std::vector<std::pair<size_t, uint16_t*>> results;
+            results.reserve(futures.size());
+            for (auto& f : futures) results.push_back(f.get());
+
+            for (auto& [idx, tile_buf] : results) {
+                if (tile_buf == nullptr) continue;
+                auto& req = tile_reqs[idx];
+                const size_t tsx = req.xe - req.xs;
+                const size_t tsy = req.ye - req.ys;
+                const size_t tsz = req.ze - req.zs;
+
+                for (size_t c = 0; c < channel_count; c++) {
+                    for (size_t zi = 0; zi < tsz; zi++) {
+                        for (size_t yi = 0; yi < tsy; yi++) {
+                            size_t tile_offset = (c * tsx * tsy * tsz) + (zi * tsx * tsy) + (yi * tsx);
+                            size_t out_x = req.xs - x_begin;
+                            size_t out_y = req.ys - y_begin + yi;
+                            size_t out_z = req.zs - z_begin + zi;
+                            size_t out_offset = (c * sx * sy * sz) + (out_z * sx * sy) + (out_y * sx) + out_x;
+                            memcpy(&out_buffer[out_offset], &tile_buf[tile_offset], tsx * sizeof(uint16_t));
+                        }
+                    }
+                }
+                free(tile_buf);
+            }
+        }
+        return out_buffer;
+    }
+
+    // === Projection case ===
+    std::tuple<size_t, size_t, size_t> dataset_size = reader->get_size(scale);
+    const size_t sizex = std::get<0>(dataset_size);
+    const size_t sizey = std::get<1>(dataset_size);
+    const size_t sizez = std::get<2>(dataset_size);
+
+    // Allocate output buffer
+    const size_t out_voxels = sx * sy * sz * channel_count;
+    const size_t out_size = out_voxels * sizeof(uint16_t);
+    uint16_t* out_buffer = (uint16_t*)malloc(out_size);
+    if (out_buffer == nullptr) return nullptr;
+
+    // Initialize output based on projection mode
+    if (project_mode == PROJECT_MAX) {
+        for (size_t i = 0; i < out_voxels; i++) out_buffer[i] = std::numeric_limits<uint16_t>::min();
+    } else if (project_mode == PROJECT_MIN) {
+        for (size_t i = 0; i < out_voxels; i++) out_buffer[i] = std::numeric_limits<uint16_t>::max();
+    }
+
+    // For avg, need sum and count buffers
+    std::vector<double> sum_buffer;
+    std::vector<uint16_t> count_buffer;
+    if (project_mode == PROJECT_AVG) {
+        sum_buffer.resize(out_voxels, 0.0);
+        count_buffer.resize(out_voxels, 0);
+    }
+
+    // Extended region for projection input
+    size_t x_end_ext = x_end, y_end_ext = y_end, z_end_ext = z_end;
+    switch (project_axis) {
+    case 'x': x_end_ext = std::min(x_end + project_frames, sizex); break;
+    case 'y': y_end_ext = std::min(y_end + project_frames, sizey); break;
+    case 'z': z_end_ext = std::min(z_end + project_frames, sizez); break;
+    }
+
+    // Build list of input chunks (aligned to compression boundaries)
+    struct ChunkReq { size_t xs, xe, ys, ye, zs, ze; };
+    std::vector<ChunkReq> chunk_reqs;
+
+    for (size_t czs = z_begin; czs < z_end_ext; czs += tile_z) {
+        size_t cze = std::min(czs + tile_z, z_end_ext);
+        for (size_t cys = y_begin; cys < y_end_ext; cys += tile_y) {
+            size_t cye = std::min(cys + tile_y, y_end_ext);
+            for (size_t cxs = x_begin; cxs < x_end_ext; cxs += tile_x) {
+                size_t cxe = std::min(cxs + tile_x, x_end_ext);
+                chunk_reqs.push_back({cxs, cxe, cys, cye, czs, cze});
+            }
+        }
+    }
+
+    std::mutex out_mutex;
+
+    for (size_t batch_start = 0; batch_start < chunk_reqs.size(); batch_start += max_parallel_tiles) {
+        size_t batch_end = std::min(batch_start + max_parallel_tiles, chunk_reqs.size());
+
+        std::vector<std::future<void>> futures;
+        futures.reserve(batch_end - batch_start);
+
+        for (size_t ci = batch_start; ci < batch_end; ci++) {
+            ChunkReq req = chunk_reqs[ci];
+            futures.push_back(std::async(std::launch::async,
+                [&, req]() {
+                uint16_t* chunk_buf = reader->load_region(scale, req.xs, req.xe, req.ys, req.ye, req.zs, req.ze);
+                if (chunk_buf == nullptr) return;
+
+                const size_t csx = req.xe - req.xs;
+                const size_t csy = req.ye - req.ys;
+                const size_t csz = req.ze - req.zs;
+
+                for (size_t c = 0; c < channel_count; c++) {
+                    for (size_t cz = 0; cz < csz; cz++) {
+                        size_t abs_z = req.zs + cz;
+                        for (size_t cy = 0; cy < csy; cy++) {
+                            size_t abs_y = req.ys + cy;
+                            for (size_t cx = 0; cx < csx; cx++) {
+                                size_t abs_x = req.xs + cx;
+
+                                const size_t ioffset = (c * csx * csy * csz) + (cz * csx * csy) + (cy * csx) + cx;
+                                const uint16_t vin = chunk_buf[ioffset];
+
+                                // Determine which output voxels this input contributes to
+                                size_t out_x_min, out_x_max, out_y_min, out_y_max, out_z_min, out_z_max;
+
+                                switch (project_axis) {
+                                case 'x':
+                                    out_x_min = (abs_x >= project_frames - 1 + x_begin) ? abs_x - project_frames + 1 : x_begin;
+                                    out_x_max = std::min(abs_x + 1, x_end);
+                                    out_y_min = abs_y; out_y_max = abs_y + 1;
+                                    out_z_min = abs_z; out_z_max = abs_z + 1;
+                                    break;
+                                case 'y':
+                                    out_x_min = abs_x; out_x_max = abs_x + 1;
+                                    out_y_min = (abs_y >= project_frames - 1 + y_begin) ? abs_y - project_frames + 1 : y_begin;
+                                    out_y_max = std::min(abs_y + 1, y_end);
+                                    out_z_min = abs_z; out_z_max = abs_z + 1;
+                                    break;
+                                case 'z':
+                                default:
+                                    out_x_min = abs_x; out_x_max = abs_x + 1;
+                                    out_y_min = abs_y; out_y_max = abs_y + 1;
+                                    out_z_min = (abs_z >= project_frames - 1 + z_begin) ? abs_z - project_frames + 1 : z_begin;
+                                    out_z_max = std::min(abs_z + 1, z_end);
+                                    break;
+                                }
+
+                                if (out_x_min >= x_end || out_y_min >= y_end || out_z_min >= z_end) continue;
+                                if (out_x_max <= x_begin || out_y_max <= y_begin || out_z_max <= z_begin) continue;
+                                out_x_min = std::max(out_x_min, x_begin);
+                                out_y_min = std::max(out_y_min, y_begin);
+                                out_z_min = std::max(out_z_min, z_begin);
+
+                                for (size_t oz = out_z_min; oz < out_z_max; oz++) {
+                                    for (size_t oy = out_y_min; oy < out_y_max; oy++) {
+                                        for (size_t ox = out_x_min; ox < out_x_max; ox++) {
+                                            size_t ooffset = (c * sx * sy * sz) +
+                                                ((oz - z_begin) * sx * sy) + ((oy - y_begin) * sx) + (ox - x_begin);
+
+                                            std::lock_guard<std::mutex> lock(out_mutex);
+                                            switch (project_mode) {
+                                            case PROJECT_MAX:
+                                                out_buffer[ooffset] = std::max(out_buffer[ooffset], vin);
+                                                break;
+                                            case PROJECT_MIN:
+                                                out_buffer[ooffset] = std::min(out_buffer[ooffset], vin);
+                                                break;
+                                            case PROJECT_AVG:
+                                                sum_buffer[ooffset] += vin;
+                                                count_buffer[ooffset]++;
+                                                break;
+                                            default:
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                free(chunk_buf);
+            }));
+        }
+
+        for (auto& f : futures) f.get();
+    }
+
+    // Finalize avg projection
+    if (project_mode == PROJECT_AVG) {
+        for (size_t i = 0; i < out_voxels; i++) {
+            if (count_buffer[i] > 0) {
+                out_buffer[i] = (uint16_t)(sum_buffer[i] / count_buffer[i]);
+            }
+        }
+    }
+
+    return out_buffer;
+}

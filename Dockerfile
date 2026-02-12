@@ -5,10 +5,10 @@ ARG BUILD_THREAD=64
 
 RUN apt update && \
     apt install -y \
-        build-essential libboost-all-dev libsqlite3-dev libasio-dev nasm cmake \
-        ffmpeg libswscale-dev libavutil-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
-        libavutil-dev libpostproc-dev libswresample-dev \
-        libhdf5-dev libc6-dev
+    build-essential libboost-all-dev libsqlite3-dev libasio-dev nasm cmake \
+    ffmpeg libswscale-dev libavutil-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
+    libavutil-dev libpostproc-dev libswresample-dev \
+    libhdf5-dev libc6-dev
 
 WORKDIR /app
 
