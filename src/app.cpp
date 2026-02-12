@@ -28,9 +28,11 @@
 #include <set>
 #include <list>
 #include <tuple>
+#include <future>
+#include <mutex>
+#include <thread>
 #include <vector>
 #include <queue>
-#include <thread>
 #include <atomic>
 #include <condition_variable>
 
@@ -40,9 +42,16 @@ int port = 100;
 int THREAD_COUNT = 32;
 bool READ_ONLY_MODE = false;
 
+const size_t MAX_STREAM_SIZE_BYTES = 2ULL * 1024 * 1024 * 1024;  // 2GB default
+
+size_t get_max_parallel_tiles() {
+    // Aggressive parallelism for large region loads
+    return THREAD_COUNT;
+}
+
 std::string DATA_PATH = "./data/";
 std::string SERVER_ROOT = "https://server/";
-const std::string VERSION_STRING = "V0.9.0";
+const std::string VERSION_STRING = "V0.9.1";
 
 using json = nlohmann::json;
 
@@ -2025,7 +2034,7 @@ int main(int argc, char *argv[])
 		
 		res.end(); });
 
-	// Streaming endpoint - streams data in Z-slabs, supports HTTP Range requests
+	// Streaming endpoint - streams data in 3D tiles, supports HTTP Range requests
 	CROW_ROUTE(app, "/<string>/stream/<string>/<string>")
 	([](const crow::request &req, crow::response &res, std::string data_id_in, std::string resolution_id, std::string tile_key)
 	 {
@@ -2080,15 +2089,20 @@ int main(int argc, char *argv[])
 			return;
 		}
 
-		// Get slab size from sub-chunk Z-size
-		size_t slab_size = sz;
+		// Get tile sizes from sub-chunk configuration
+		size_t tile_x = sx, tile_y = sy, tile_z = sz;
 		packed_reader *pr = reader->get_mchunk(scale, 0, 0, 0, 0);
 		if (pr != nullptr) {
-			slab_size = std::min((size_t)pr->chunkz, sz);
+			tile_x = std::min((size_t)pr->chunkx, sx);
+			tile_y = std::min((size_t)pr->chunky, sy);
+			tile_z = std::min((size_t)pr->chunkz, sz);
 		}
-		if (slab_size < 1) slab_size = 1;
+		if (tile_x < 1) tile_x = 1;
+		if (tile_y < 1) tile_y = 1;
+		if (tile_z < 1) tile_z = 1;
 
-		const size_t total_size = sizeof(uint16_t) * sx * sy * sz * reader->channel_count;
+		const size_t channel_count = reader->channel_count;
+		const size_t total_size = sizeof(uint16_t) * sx * sy * sz * channel_count;
 
 		// Parse Range header
 		size_t range_start = 0;
@@ -2118,27 +2132,49 @@ int main(int argc, char *argv[])
 
 		const size_t content_length = range_end - range_start + 1;
 
-		CROW_LOG_INFO << "[STREAM] total_size=" << total_size << " slab_size=" << slab_size
+		// Reject very large full requests - clients should use Range header for large downloads
+		// This prevents OOM from buffering huge responses
+		if (!has_range && total_size > MAX_STREAM_SIZE_BYTES) {
+			res.code = 413; // Payload Too Large
+			res.set_header("Accept-Ranges", "bytes");
+			res.set_header("X-Max-Size", std::to_string(MAX_STREAM_SIZE_BYTES));
+			res.set_header("X-Requested-Size", std::to_string(total_size));
+			std::ostringstream msg;
+			msg << "Request too large (" << (total_size / (1024*1024)) << " MB). "
+				<< "Max single request: " << (MAX_STREAM_SIZE_BYTES / (1024*1024)) << " MB. "
+				<< "Use Range header for large downloads (e.g., Range: bytes=0-" << (MAX_STREAM_SIZE_BYTES-1) << ")";
+			res.end(msg.str());
+			CROW_LOG_WARNING << "[STREAM] Rejected oversized request: " << total_size << " bytes";
+			return;
+		}
+
+		CROW_LOG_INFO << "[STREAM] total_size=" << total_size << " tile=" << tile_x << "x" << tile_y << "x" << tile_z
 			<< " range=" << range_start << "-" << range_end << " has_range=" << has_range;
 
 		res.set_header("Content-Type", "application/octet-stream");
 		res.set_header("Accept-Ranges", "bytes");
 
+		// For Range requests, we need Content-Length for partial content
+		// For full requests, we use chunked transfer to avoid buffering entire response
 		if (has_range) {
 			res.code = 206; // Partial Content
 			res.set_header("Content-Range", "bytes " + std::to_string(range_start) + "-" +
 				std::to_string(range_end) + "/" + std::to_string(total_size));
+			res.set_header("Content-Length", std::to_string(content_length));
+		} else {
+			// Use chunked transfer encoding for full requests - no buffering!
+			res.set_header("X-Total-Size", std::to_string(total_size));
 		}
-		res.set_header("Content-Length", std::to_string(content_length));
 
-		// Stream data, respecting byte range
+		// Stream data in Z-slabs, but load smaller X-Y tiles within each slab
+		// Memory layout is [channel][x][y][z], so we iterate Z-slabs for contiguous output
 		size_t bytes_written = 0;
 		size_t current_byte_offset = 0;
 
-		for (size_t zs = z_begin; zs < z_end && bytes_written < content_length; zs += slab_size) {
-			size_t ze = std::min(zs + slab_size, (size_t)z_end);
+		for (size_t zs = z_begin; zs < z_end && bytes_written < content_length; zs += tile_z) {
+			size_t ze = std::min(zs + tile_z, (size_t)z_end);
 			size_t slab_sz = ze - zs;
-			const size_t slab_bytes = sizeof(uint16_t) * sx * sy * slab_sz * reader->channel_count;
+			const size_t slab_bytes = sizeof(uint16_t) * sx * sy * slab_sz * channel_count;
 
 			// Skip slabs entirely before range_start
 			if (current_byte_offset + slab_bytes <= range_start) {
@@ -2146,11 +2182,81 @@ int main(int argc, char *argv[])
 				continue;
 			}
 
-			uint16_t *buf = reader->load_region(scale, x_begin, x_end, y_begin, y_end, zs, ze);
-			if (buf == nullptr) break;
+			// Allocate slab buffer for the full X-Y plane at this Z-slab
+			uint16_t *slab_buf = (uint16_t *)calloc(slab_bytes, 1);
+			if (slab_buf == nullptr) {
+				CROW_LOG_ERROR << "[STREAM] Failed to allocate slab buffer of " << slab_bytes << " bytes";
+				break;
+			}
 
-			for (const auto &f : filters) {
-				filter_run(buf, slab_bytes, {sx, sy, slab_sz}, reader->channel_count, f.first, f.second);
+			// Load smaller X-Y tiles in PARALLEL and copy into the slab buffer
+			// Collect all tile requests for this slab
+			struct TileRequest {
+				size_t xs, xe, ys, ye;
+				size_t tile_sx, tile_sy;
+			};
+			std::vector<TileRequest> tile_requests;
+
+			for (size_t xs = x_begin; xs < x_end; xs += tile_x) {
+				size_t xe = std::min(xs + tile_x, (size_t)x_end);
+				size_t tile_sx = xe - xs;
+				for (size_t ys = y_begin; ys < y_end; ys += tile_y) {
+					size_t ye = std::min(ys + tile_y, (size_t)y_end);
+					size_t tile_sy = ye - ys;
+					tile_requests.push_back({xs, xe, ys, ye, tile_sx, tile_sy});
+				}
+			}
+
+			// Load tiles in parallel batches
+			const size_t max_parallel_tiles = get_max_parallel_tiles();
+
+			for (size_t batch_start = 0; batch_start < tile_requests.size(); batch_start += max_parallel_tiles) {
+				size_t batch_end = std::min(batch_start + max_parallel_tiles, tile_requests.size());
+
+				// Launch parallel tile loads
+				std::vector<std::future<std::pair<size_t, uint16_t*>>> futures;
+				futures.reserve(batch_end - batch_start);
+
+				for (size_t i = batch_start; i < batch_end; i++) {
+					TileRequest req = tile_requests[i];  // Copy by value for lambda capture
+					futures.push_back(std::async(std::launch::async, [reader, scale, req, zs, ze, i]() {
+						uint16_t* tile_buf = reader->load_region(scale, req.xs, req.xe, req.ys, req.ye, zs, ze);
+						return std::make_pair(i, tile_buf);
+					}));
+				}
+
+				// Wait for batch and copy results - collect all buffers first for exception safety
+				std::vector<uint16_t*> tile_buffers;
+				tile_buffers.reserve(futures.size());
+				for (auto& f : futures) {
+					tile_buffers.push_back(f.get().second);
+				}
+
+				// Copy and free each tile
+				for (size_t fi = 0; fi < tile_buffers.size(); fi++) {
+					uint16_t* tile_buf = tile_buffers[fi];
+					if (tile_buf == nullptr) continue;
+
+					size_t req_idx = batch_start + fi;
+					auto& req = tile_requests[req_idx];
+
+					// Copy tile data into correct position in slab buffer
+					// Memory layout: [channel][x][y][z]
+					for (size_t c = 0; c < channel_count; c++) {
+						for (size_t xi = 0; xi < req.tile_sx; xi++) {
+							for (size_t yi = 0; yi < req.tile_sy; yi++) {
+								size_t tile_offset = (c * req.tile_sx * req.tile_sy * slab_sz) +
+									(xi * req.tile_sy * slab_sz) + (yi * slab_sz);
+								size_t slab_x = req.xs - x_begin + xi;
+								size_t slab_y = req.ys - y_begin + yi;
+								size_t slab_offset = (c * sx * sy * slab_sz) +
+									(slab_x * sy * slab_sz) + (slab_y * slab_sz);
+								memcpy(&slab_buf[slab_offset], &tile_buf[tile_offset], slab_sz * sizeof(uint16_t));
+							}
+						}
+					}
+					free(tile_buf);
+				}
 			}
 
 			// Calculate which portion of this slab to send
@@ -2165,10 +2271,13 @@ int main(int argc, char *argv[])
 			}
 
 			size_t to_write = slab_end - slab_start;
-			res.write(std::string((char *)buf + slab_start, to_write));
+			res.write(std::string((char *)slab_buf + slab_start, to_write));
 			bytes_written += to_write;
 			current_byte_offset += slab_bytes;
-			free(buf);
+			free(slab_buf);
+
+			CROW_LOG_DEBUG << "[STREAM] Sent slab z=" << zs << "-" << ze << " bytes=" << to_write
+				<< " total_sent=" << bytes_written;
 		}
 
 		CROW_LOG_INFO << "[STREAM] Complete: " << data_id << " bytes_sent=" << bytes_written
@@ -2259,213 +2368,48 @@ int main(int argc, char *argv[])
 		//uint16_t out_buffer[handler->channel_count][chunk_sizes[2]][chunk_sizes[1]][chunk_sizes[0]];
 		const size_t out_buffer_size = sizeof(uint16_t) * chunk_sizes[0] * chunk_sizes[1] * chunk_sizes[2] * reader->channel_count;
 
-		enum projectfunction
-		{
-			max_project,
-			min_project,
-			avg_project
-		};
-
-		int64_t project_frames = -1; // Number of frames to max project
-		char project_axis = 0;		 // Axis to max project along
-		projectfunction project_mode = max_project; // What projection function to use
+		int64_t project_frames = -1;
+		char project_axis = 0;
+		ProjectFunction project_mode = PROJECT_MAX;
 
 		// Check for project parameters in filters list
-		for (const auto &pair : filters)
-		{
-			if (pair.second.empty())
-			{
-				continue;
-			}
-			if (pair.first == "project")
-			{
+		for (const auto &pair : filters) {
+			if (pair.second.empty()) continue;
+			if (pair.first == "project") {
 				project_frames = std::stoi(pair.second);
-			}
-			else if (pair.first == "project_axis")
-			{
+			} else if (pair.first == "project_axis") {
 				project_axis = pair.second.at(0);
-			}
-			else if (pair.first == "project_function")
-			{
-				if (pair.second == "max")
-				{
-					project_mode = max_project;
-				}
-				else if (pair.second == "min")
-				{
-					project_mode = min_project;
-				}
-				else if (pair.second == "avg")
-				{
-					project_mode = avg_project;
-				}
+			} else if (pair.first == "project_function") {
+				if (pair.second == "max") project_mode = PROJECT_MAX;
+				else if (pair.second == "min") project_mode = PROJECT_MIN;
+				else if (pair.second == "avg") project_mode = PROJECT_AVG;
 			}
 		}
 
-		if(project_frames > 1) {
-			if(project_axis == 0) {
-				if(chunk_sizes[0] == 1) {
-					project_axis = 'x';
-				} else if (chunk_sizes[1] == 1) {
-					project_axis = 'y';
-				} else { //if (chunk_sizes[2] == 1) {
-					project_axis = 'z';
-				}
+		if (project_frames > 1) {
+			if (project_axis == 0) {
+				if (chunk_sizes[0] == 1) project_axis = 'x';
+				else if (chunk_sizes[1] == 1) project_axis = 'y';
+				else project_axis = 'z';
 			}
-
 			// Scale frame count by downsampling
 			project_frames /= scale;
-			if(project_frames < 1) {
-				project_frames = 1;
-			}
+			if (project_frames < 1) project_frames = 1;
 		}
 
-		uint16_t * out_buffer;
+		uint16_t *out_buffer;
 
-		if(project_frames > 1) {
-			out_buffer = (uint16_t *) calloc(out_buffer_size, 1);
+		if (project_frames > 1) {
+			if (project_axis != 'x' && project_axis != 'y' && project_axis != 'z')
+				project_axis = 'z';
 
-			switch(project_axis) {
-				case 'x':
-				case 'y':
-				case 'z':
-					break;
-				default:
-					project_axis = 'z';
-			}
-
-			size_t x_begin_project = x_begin;
-			size_t y_begin_project = y_begin;
-			size_t z_begin_project = z_begin;
-
-			size_t x_end_project = x_end;
-			size_t y_end_project = y_end;
-			size_t z_end_project = z_end;
-
-			std::tuple<size_t, size_t, size_t> dataset_size = reader->get_size(scale);
-
-			const size_t sizex = std::get<0>(dataset_size);
-			const size_t sizey = std::get<1>(dataset_size);
-			const size_t sizez = std::get<2>(dataset_size);
-
-			switch (project_axis)
-			{
-			case 'x':
-				x_end_project += project_frames;
-				x_end_project = std::min(sizex, x_end_project);
-				break;
-			case 'y':
-				y_end_project += project_frames;
-				y_end_project = std::min(sizey, y_end_project);
-				break;
-			case 'z':
-				z_end_project += project_frames;
-				z_end_project = std::min(sizez, z_end_project);
-				break;
-			}
-
-			const size_t x_project_size = x_end_project - x_begin_project;
-			const size_t y_project_size = y_end_project - y_begin_project;
-			const size_t z_project_size = z_end_project - z_begin_project;
-
-			uint16_t * tmp_buffer = reader->load_region(
-				scale,
-				x_begin_project, x_end_project,
-				y_begin_project, y_end_project,
-				z_begin_project, z_end_project
-			);
-
-			uint16_t vout;
-			double sum;
-			for (size_t c = 0; c < reader->channel_count; c++)
-			{
-				for (size_t k = 0; k < chunk_sizes[2]; k++)
-				{
-					for (size_t j = 0; j < chunk_sizes[1]; j++)
-					{
-						for (size_t i = 0; i < chunk_sizes[0]; i++)
-						{
-							switch (project_mode)
-							{
-							case max_project:
-								vout = std::numeric_limits<uint16_t>::min();
-								break;
-							case min_project:
-								vout = std::numeric_limits<uint16_t>::max();
-								break;
-							case avg_project:
-								vout = 0;
-								sum = 0.0;
-								break;
-							}
-
-							for (size_t p = 0; p < project_frames; p++)
-							{
-								size_t new_i = i;
-								size_t new_j = j;
-								size_t new_k = k;
-
-								switch (project_axis)
-								{
-								case 'x':
-									new_i = std::min(x_project_size - 1, new_i + p);
-									break;
-								case 'y':
-									new_j = std::min(y_project_size - 1, new_j + p);
-									break;
-								case 'z':
-									new_k = std::min(z_project_size - 1, new_k + p);
-									break;
-								}
-
-								const size_t ioffset = (c * x_project_size * y_project_size * z_project_size) + // C
-													   (new_k * x_project_size * y_project_size) +				// Z
-													   (new_j * x_project_size) +								// Y
-													   (new_i);													// X
-
-								const uint16_t vin = tmp_buffer[ioffset];
-
-								switch (project_mode)
-								{
-								case max_project:
-									vout = std::max(vin, vout);
-									break;
-								case min_project:
-									vout = std::min(vin, vout);
-									break;
-								case avg_project:
-									vout++;
-									sum += vin;
-									break;
-								}
-							}
-
-							if (project_mode == avg_project)
-							{
-								sum /= vout;
-								vout = sum;
-							}
-
-							const size_t ooffset = (c * chunk_sizes[0] * chunk_sizes[1] * chunk_sizes[2]) + // C
-												   (k * chunk_sizes[0] * chunk_sizes[1]) +					// Z
-												   (j * chunk_sizes[0]) +									// Y
-												   (i);														// X
-
-							out_buffer[ooffset] = vout;
-						}
-					}
-				}
-			}
-
-			free(tmp_buffer);
+			out_buffer = parallel_load_region(reader, scale,
+				x_begin, x_end, y_begin, y_end, z_begin, z_end,
+				project_mode, project_axis, (size_t)project_frames, get_max_parallel_tiles());
 		} else {
-			// Load unprojected data
-			out_buffer = reader->load_region(
-				scale,
-				x_begin, x_end,
-				y_begin, y_end,
-				z_begin, z_end
-			);
+			out_buffer = parallel_load_region(reader, scale,
+				x_begin, x_end, y_begin, y_end, z_begin, z_end,
+				PROJECT_NONE, 'z', 0, get_max_parallel_tiles());
 		}
 
 		for(const auto& pair : filters) {
