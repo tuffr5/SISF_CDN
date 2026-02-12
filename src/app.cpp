@@ -2495,7 +2495,7 @@ int main(int argc, char *argv[])
 			//.use_compression(crow::compression::algorithm::GZIP)
 			.concurrency(THREAD_COUNT)
 			//.multithreaded()
-			.loglevel(crow::LogLevel::Warning)
+			.loglevel(crow::LogLevel::Debug)
 			.timeout(5)
 			.run();
 	}
