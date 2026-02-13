@@ -2236,17 +2236,17 @@ int main(int argc, char *argv[])
 					auto& req = tile_requests[req_idx];
 
 					// Copy tile data into correct position in slab buffer
-					// Memory layout: [channel][x][y][z]
+					// Memory layout from load_region: [channel][z][y][x] (X varies fastest)
 					for (size_t c = 0; c < channel_count; c++) {
-						for (size_t xi = 0; xi < req.tile_sx; xi++) {
+						for (size_t zi = 0; zi < slab_sz; zi++) {
 							for (size_t yi = 0; yi < req.tile_sy; yi++) {
-								size_t tile_offset = (c * req.tile_sx * req.tile_sy * slab_sz) +
-									(xi * req.tile_sy * slab_sz) + (yi * slab_sz);
-								size_t slab_x = req.xs - x_begin + xi;
+								size_t tile_offset = (c * slab_sz * req.tile_sy * req.tile_sx) +
+									(zi * req.tile_sy * req.tile_sx) + (yi * req.tile_sx);
 								size_t slab_y = req.ys - y_begin + yi;
-								size_t slab_offset = (c * sx * sy * slab_sz) +
-									(slab_x * sy * slab_sz) + (slab_y * slab_sz);
-								memcpy(&slab_buf[slab_offset], &tile_buf[tile_offset], slab_sz * sizeof(uint16_t));
+								size_t slab_x = req.xs - x_begin;
+								size_t slab_offset = (c * slab_sz * sy * sx) +
+									(zi * sy * sx) + (slab_y * sx) + slab_x;
+								memcpy(&slab_buf[slab_offset], &tile_buf[tile_offset], req.tile_sx * sizeof(uint16_t));
 							}
 						}
 					}
