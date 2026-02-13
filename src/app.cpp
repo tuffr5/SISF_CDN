@@ -28,7 +28,6 @@
 #include <set>
 #include <list>
 #include <tuple>
-#include <future>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -41,8 +40,6 @@
 int port = 100;
 int THREAD_COUNT = 32;
 bool READ_ONLY_MODE = false;
-
-const size_t MAX_STREAM_SIZE_BYTES = 2ULL * 1024 * 1024 * 1024;  // 2GB default
 
 std::string DATA_PATH = "./data/";
 std::string SERVER_ROOT = "https://server/";
@@ -2029,7 +2026,7 @@ int main(int argc, char *argv[])
 		
 		res.end(); });
 
-	// Streaming endpoint - streams data in 3D tiles, supports HTTP Range requests
+	// Streaming endpoint - same as regular endpoint but with HTTP Range header support
 	CROW_ROUTE(app, "/<string>/stream/<string>/<string>")
 	([](const crow::request &req, crow::response &res, std::string data_id_in, std::string resolution_id, std::string tile_key)
 	 {
@@ -2037,7 +2034,7 @@ int main(int argc, char *argv[])
 
 		CROW_LOG_INFO << "[STREAM] Request: " << data_id_in << " scale=" << resolution_id << " range=" << tile_key;
 
-		auto [data_id, filters] = parse_filter_list(data_id_in);
+		std::string data_id = std::get<0>(parse_filter_list(data_id_in));
 		archive_reader *reader = search_inventory(data_id);
 
 		if (reader == nullptr) {
@@ -2045,8 +2042,6 @@ int main(int argc, char *argv[])
 			res.end("404 Not Found\n");
 			return;
 		}
-
-		// Read operations are public - no token check needed
 
 		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
 		if (sscanf(tile_key.c_str(), "%u-%u_%u-%u_%u-%u", &x_begin, &x_end, &y_begin, &y_end, &z_begin, &z_end) != 6) {
@@ -2084,18 +2079,6 @@ int main(int argc, char *argv[])
 			return;
 		}
 
-		// Get tile sizes from sub-chunk configuration
-		size_t tile_x = sx, tile_y = sy, tile_z = sz;
-		packed_reader *pr = reader->get_mchunk(scale, 0, 0, 0, 0);
-		if (pr != nullptr) {
-			tile_x = std::min((size_t)pr->chunkx, sx);
-			tile_y = std::min((size_t)pr->chunky, sy);
-			tile_z = std::min((size_t)pr->chunkz, sz);
-		}
-		if (tile_x < 1) tile_x = 1;
-		if (tile_y < 1) tile_y = 1;
-		if (tile_z < 1) tile_z = 1;
-
 		const size_t channel_count = reader->channel_count;
 		const size_t total_size = sizeof(uint16_t) * sx * sy * sz * channel_count;
 
@@ -2106,7 +2089,6 @@ int main(int argc, char *argv[])
 
 		std::string range_header = req.get_header_value("Range");
 		if (!range_header.empty()) {
-			// Parse "bytes=START-END" or "bytes=START-"
 			size_t rs, re;
 			if (sscanf(range_header.c_str(), "bytes=%zu-%zu", &rs, &re) == 2) {
 				range_start = rs;
@@ -2127,156 +2109,29 @@ int main(int argc, char *argv[])
 
 		const size_t content_length = range_end - range_start + 1;
 
-		// Reject very large full requests - clients should use Range header for large downloads
-		// This prevents OOM from buffering huge responses
-		if (!has_range && total_size > MAX_STREAM_SIZE_BYTES) {
-			res.code = 413; // Payload Too Large
-			res.set_header("Accept-Ranges", "bytes");
-			res.set_header("X-Max-Size", std::to_string(MAX_STREAM_SIZE_BYTES));
-			res.set_header("X-Requested-Size", std::to_string(total_size));
-			std::ostringstream msg;
-			msg << "Request too large (" << (total_size / (1024*1024)) << " MB). "
-				<< "Max single request: " << (MAX_STREAM_SIZE_BYTES / (1024*1024)) << " MB. "
-				<< "Use Range header for large downloads (e.g., Range: bytes=0-" << (MAX_STREAM_SIZE_BYTES-1) << ")";
-			res.end(msg.str());
-			CROW_LOG_WARNING << "[STREAM] Rejected oversized request: " << total_size << " bytes";
+		// Load the full region
+		uint16_t *out_buffer = reader->load_region(scale, x_begin, x_end, y_begin, y_end, z_begin, z_end);
+
+		if (out_buffer == nullptr) {
+			res.code = crow::status::INTERNAL_SERVER_ERROR;
+			res.end("500 Internal Server Error -- Failed to load region\n");
 			return;
 		}
 
-		CROW_LOG_INFO << "[STREAM] total_size=" << total_size << " tile=" << tile_x << "x" << tile_y << "x" << tile_z
-			<< " range=" << range_start << "-" << range_end << " has_range=" << has_range;
-
+		// Set response headers
 		res.set_header("Content-Type", "application/octet-stream");
 		res.set_header("Accept-Ranges", "bytes");
+		res.set_header("Content-Length", std::to_string(content_length));
 
-		// For Range requests, we need Content-Length for partial content
-		// For full requests, we use chunked transfer to avoid buffering entire response
 		if (has_range) {
 			res.code = 206; // Partial Content
 			res.set_header("Content-Range", "bytes " + std::to_string(range_start) + "-" +
 				std::to_string(range_end) + "/" + std::to_string(total_size));
-			res.set_header("Content-Length", std::to_string(content_length));
-		} else {
-			// Use chunked transfer encoding for full requests - no buffering!
-			res.set_header("X-Total-Size", std::to_string(total_size));
 		}
 
-		// Stream data in Z-slabs, but load smaller X-Y tiles within each slab
-		// Memory layout is [channel][x][y][z], so we iterate Z-slabs for contiguous output
-		size_t bytes_written = 0;
-		size_t current_byte_offset = 0;
-
-		for (size_t zs = z_begin; zs < z_end && bytes_written < content_length; zs += tile_z) {
-			size_t ze = std::min(zs + tile_z, (size_t)z_end);
-			size_t slab_sz = ze - zs;
-			const size_t slab_bytes = sizeof(uint16_t) * sx * sy * slab_sz * channel_count;
-
-			// Skip slabs entirely before range_start
-			if (current_byte_offset + slab_bytes <= range_start) {
-				current_byte_offset += slab_bytes;
-				continue;
-			}
-
-			// Allocate slab buffer for the full X-Y plane at this Z-slab
-			uint16_t *slab_buf = (uint16_t *)calloc(slab_bytes, 1);
-			if (slab_buf == nullptr) {
-				CROW_LOG_ERROR << "[STREAM] Failed to allocate slab buffer of " << slab_bytes << " bytes";
-				break;
-			}
-
-			// Load smaller X-Y tiles in PARALLEL and copy into the slab buffer
-			// Collect all tile requests for this slab
-			struct TileRequest {
-				size_t xs, xe, ys, ye;
-				size_t tile_sx, tile_sy;
-			};
-			std::vector<TileRequest> tile_requests;
-
-			for (size_t xs = x_begin; xs < x_end; xs += tile_x) {
-				size_t xe = std::min(xs + tile_x, (size_t)x_end);
-				size_t tile_sx = xe - xs;
-				for (size_t ys = y_begin; ys < y_end; ys += tile_y) {
-					size_t ye = std::min(ys + tile_y, (size_t)y_end);
-					size_t tile_sy = ye - ys;
-					tile_requests.push_back({xs, xe, ys, ye, tile_sx, tile_sy});
-				}
-			}
-
-			// Load tiles in parallel batches
-			const size_t max_parallel_tiles = 16;
-
-			for (size_t batch_start = 0; batch_start < tile_requests.size(); batch_start += max_parallel_tiles) {
-				size_t batch_end = std::min(batch_start + max_parallel_tiles, tile_requests.size());
-
-				// Launch parallel tile loads
-				std::vector<std::future<std::pair<size_t, uint16_t*>>> futures;
-				futures.reserve(batch_end - batch_start);
-
-				for (size_t i = batch_start; i < batch_end; i++) {
-					TileRequest req = tile_requests[i];  // Copy by value for lambda capture
-					futures.push_back(std::async(std::launch::async, [reader, scale, req, zs, ze, i]() {
-						uint16_t* tile_buf = reader->load_region(scale, req.xs, req.xe, req.ys, req.ye, zs, ze);
-						return std::make_pair(i, tile_buf);
-					}));
-				}
-
-				// Wait for batch and copy results - collect all buffers first for exception safety
-				std::vector<uint16_t*> tile_buffers;
-				tile_buffers.reserve(futures.size());
-				for (auto& f : futures) {
-					tile_buffers.push_back(f.get().second);
-				}
-
-				// Copy and free each tile
-				for (size_t fi = 0; fi < tile_buffers.size(); fi++) {
-					uint16_t* tile_buf = tile_buffers[fi];
-					if (tile_buf == nullptr) continue;
-
-					size_t req_idx = batch_start + fi;
-					auto& req = tile_requests[req_idx];
-
-					// Copy tile data into correct position in slab buffer
-					// Memory layout from load_region: [channel][z][y][x] (X varies fastest)
-					for (size_t c = 0; c < channel_count; c++) {
-						for (size_t zi = 0; zi < slab_sz; zi++) {
-							for (size_t yi = 0; yi < req.tile_sy; yi++) {
-								size_t tile_offset = (c * slab_sz * req.tile_sy * req.tile_sx) +
-									(zi * req.tile_sy * req.tile_sx) + (yi * req.tile_sx);
-								size_t slab_y = req.ys - y_begin + yi;
-								size_t slab_x = req.xs - x_begin;
-								size_t slab_offset = (c * slab_sz * sy * sx) +
-									(zi * sy * sx) + (slab_y * sx) + slab_x;
-								memcpy(&slab_buf[slab_offset], &tile_buf[tile_offset], req.tile_sx * sizeof(uint16_t));
-							}
-						}
-					}
-					free(tile_buf);
-				}
-			}
-
-			// Calculate which portion of this slab to send
-			size_t slab_start = 0;
-			size_t slab_end = slab_bytes;
-
-			if (current_byte_offset < range_start) {
-				slab_start = range_start - current_byte_offset;
-			}
-			if (current_byte_offset + slab_bytes > range_end + 1) {
-				slab_end = range_end + 1 - current_byte_offset;
-			}
-
-			size_t to_write = slab_end - slab_start;
-			res.write(std::string((char *)slab_buf + slab_start, to_write));
-			bytes_written += to_write;
-			current_byte_offset += slab_bytes;
-			free(slab_buf);
-
-			CROW_LOG_DEBUG << "[STREAM] Sent slab z=" << zs << "-" << ze << " bytes=" << to_write
-				<< " total_sent=" << bytes_written;
-		}
-
-		CROW_LOG_INFO << "[STREAM] Complete: " << data_id << " bytes_sent=" << bytes_written
-			<< " time_us=" << calculate_dt(begin);
+		// Send the requested byte range
+		res.body = std::string((char *)out_buffer + range_start, content_length);
+		free(out_buffer);
 
 		res.end();
 		log_time(data_id, "STREAM", scale, sx, sy, sz, begin); });
