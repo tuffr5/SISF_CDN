@@ -5,13 +5,14 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include <shared_mutex>
 #include <tuple>
 
 #define PERF_COUNTER_ENABLE 1
 #define IP_COUNTER_ENABLE 1
 #define IP_USING_NGINX_FORWARD 1 // Read IP from X-Forwarded-For
 
-std::mutex perf_counter_mutex;
+std::shared_mutex perf_counter_mutex;  // Reader-writer lock: reads don't block each other
 std::map<std::tuple<std::string, std::string, uint16_t, uint16_t, uint16_t, uint16_t>, std::vector<u_int32_t>> perf_counters;
 
 inline std::chrono::steady_clock::time_point now()
@@ -31,15 +32,15 @@ void log_time(std::string dset, std::string cmd_name, size_t scale, size_t xs, s
     {
         u_int32_t dt = calculate_dt(then);
 
-        perf_counter_mutex.lock();
+        std::unique_lock<std::shared_mutex> lock(perf_counter_mutex);
         perf_counters[{dset, cmd_name, (uint16_t)scale, (uint16_t)xs, (uint16_t)ys, (uint16_t)zs}].push_back(dt);
-        perf_counter_mutex.unlock();
     }
 }
 
 // auto begin = now();
 // log_time(data_id, "READ", begin);
 
+std::mutex ip_counter_mutex;
 std::map<std::string, size_t> ip_counter;
 
 struct CounterMiddleware
@@ -52,6 +53,7 @@ struct CounterMiddleware
     {
         if (IP_COUNTER_ENABLE)
         {
+            std::lock_guard<std::mutex> lock(ip_counter_mutex);
             if (IP_USING_NGINX_FORWARD)
             {
                 // Relies on a server that has "proxy_set_header X-Forwarded-For $remote_addr;" set in the proxy settings

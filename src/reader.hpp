@@ -2,6 +2,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include <iostream>
 #include <sstream>
@@ -13,6 +15,8 @@
 #include <queue>
 #include <deque>
 #include <mutex>
+#include <shared_mutex>
+#include <atomic>
 #include <map>
 #include <chrono>
 
@@ -61,15 +65,7 @@
 #define DEBUG_SLICING 0
 #define IO_RETRY_COUNT 5
 
-size_t mchunk_uuid = 0;
-std::mutex mchunk_uuid_mutex;
-
-struct global_chunk_line
-{
-    size_t mchunk;
-    size_t chunk;
-    uint16_t *ptr;
-};
+std::atomic<size_t> mchunk_uuid{0};
 
 enum ArchiveType
 {
@@ -80,13 +76,6 @@ enum ArchiveType
 };
 
 using json = nlohmann::json;
-
-std::chrono::duration cache_lock_timeout = std::chrono::milliseconds(10);
-
-std::timed_mutex global_chunk_cache_mutex;
-size_t global_cache_size = 100;
-global_chunk_line *global_chunk_cache = (global_chunk_line *)calloc(global_cache_size, sizeof(global_chunk_line));
-size_t global_chunk_cache_last = 0;
 
 // https://stackoverflow.com/questions/8401777/simple-glob-in-c-on-unix-system
 std::vector<std::string> glob_tool(const std::string &pattern)
@@ -140,6 +129,10 @@ class packed_reader
 private:
     const size_t entry_file_line_size = 8 + 4;
     const size_t header_size_expected = sizeof(uint16_t) * 7 + sizeof(uint64_t) * 9;
+
+    // File descriptors for concurrent pread() access (no locking needed)
+    int meta_fd = -1;
+    int data_fd = -1;
 
 public:
     bool is_valid;
@@ -226,11 +219,29 @@ public:
 
         max_chunk_size = channel_count * chunkx * chunky * chunkz * sizeof(uint16_t);
 
+        // Open file descriptors for concurrent pread() access
+        meta_fd = open(meta_fname.c_str(), O_RDONLY);
+        data_fd = open(data_fname.c_str(), O_RDONLY);
+
+        if (meta_fd < 0 || data_fd < 0)
+        {
+            std::cerr << "Failed to open file descriptors" << std::endl;
+            if (meta_fd >= 0) close(meta_fd);
+            if (data_fd >= 0) close(data_fd);
+            meta_fd = -1;
+            data_fd = -1;
+            return;
+        }
+
         is_valid = true;
     }
 
     ~packed_reader()
     {
+        if (meta_fd >= 0)
+            close(meta_fd);
+        if (data_fd >= 0)
+            close(data_fd);
     }
 
     size_t find_index(size_t x, size_t y, size_t z)
@@ -248,31 +259,26 @@ public:
         out->offset = 0;
         out->size = 0;
 
-        const size_t offset = header_size + (entry_file_line_size * id);
+        if (meta_fd < 0)
+            return out;
 
+        const off_t offset = header_size + (entry_file_line_size * id);
+
+        // pread is atomic and thread-safe - no locking needed
         for (size_t i = 0; i < IO_RETRY_COUNT; i++)
         {
-            std::ifstream file(meta_fname, std::ios::in | std::ios::binary);
+            // Read offset and size in one pread call
+            char buf[sizeof(uint64_t) + sizeof(uint32_t)];
+            ssize_t bytes_read = pread(meta_fd, buf, sizeof(buf), offset);
 
-            if (file.fail())
-            {
-                std::cerr << "Fopen failed (metadata)" << std::endl;
-                continue;
-            }
-
-            file.seekg(offset);
-            file.read((char *)&(out->offset), sizeof(uint64_t));
-            std::streamsize bytes_read = file.gcount();
-            file.read((char *)&(out->size), sizeof(uint32_t));
-            bytes_read += file.gcount();
-            file.close();
-
-            if (bytes_read != sizeof(uint32_t) + sizeof(uint64_t))
+            if (bytes_read != sizeof(buf))
             {
                 std::cerr << "Metadata read failed (short read)" << std::endl;
                 continue;
             }
 
+            memcpy(&(out->offset), buf, sizeof(uint64_t));
+            memcpy(&(out->size), buf + sizeof(uint64_t), sizeof(uint32_t));
             break;
         }
 
@@ -301,179 +307,191 @@ public:
         }
     }
 
-    std::mutex chunk_cache_mutex;
-    std::deque<std::tuple<size_t, uint16_t *>> chunk_cache;
-
+    // Simplified load_chunk - no global cache (load_region has local cache, OS has page cache)
     uint16_t *load_chunk(size_t id, size_t sizex, size_t sizey, size_t sizez)
     {
         const size_t out_buffer_size = sizex * sizey * sizez * sizeof(uint16_t);
-        uint16_t *out = (uint16_t *)calloc(out_buffer_size, 1);
         metadata_entry *sel = load_meta_entry(id);
 
         if (sel->size == 0)
         {
-            // Failed to read metadata (impossible for chunk size to be 0)
+            free(sel);
+            return (uint16_t *)calloc(out_buffer_size, 1);
+        }
+
+        uint16_t *read_buffer = (uint16_t *)malloc(sel->size);
+
+        bool read_failed = true;
+        for (size_t i = 0; i < IO_RETRY_COUNT; i++)
+        {
+            if (data_fd < 0)
+                continue;
+
+            ssize_t bytes_read = pread(data_fd, (char *)read_buffer, sel->size, sel->offset);
+
+            if (bytes_read != (ssize_t)sel->size)
+                continue;
+
+            read_failed = false;
+            break;
+        }
+
+        if (read_failed)
+        {
+            free(read_buffer);
+            free(sel);
+            return (uint16_t *)calloc(out_buffer_size, 1);
+        }
+
+        uint16_t *out;
+
+        switch (compression_type)
+        {
+        case 1:
+            // ZSTD: decompress directly to output buffer
+            out = (uint16_t *)calloc(out_buffer_size, 1);
+            ZSTD_decompress(out, out_buffer_size, read_buffer, sel->size);
+            free(read_buffer);
             free(sel);
             return out;
-        }
 
-        uint16_t *from_cache = 0;
-
-        if (global_chunk_cache_mutex.try_lock_for(cache_lock_timeout))
+        case 2:
+        case 3:
         {
-            for (size_t i = 0; i < global_cache_size; i++)
-            {
-                if (global_chunk_cache[i].chunk == id)
-                {
-                    if (global_chunk_cache[i].mchunk == this_mchunk_id)
-                    {
-                        from_cache = global_chunk_cache[i].ptr;
-                        break;
-                    }
-                }
-            }
-
-            // Copy from cache
-            if (from_cache != 0)
-            {
-                memcpy((void *)out, (void *)from_cache, out_buffer_size);
-            }
-
-            global_chunk_cache_mutex.unlock();
-        }
-
-        // Either from_cache has the chunk, or was not in cache, or failed to get lock
-
-        if (from_cache == 0)
-        {
-            // Read from file
-            size_t buffer_size = sel->size;
-            uint16_t *read_buffer = (uint16_t *)malloc(buffer_size);
-
-            bool read_failed = true;
-            for (size_t i = 0; i < IO_RETRY_COUNT; i++)
-            {
-                std::ifstream file(data_fname, std::ios::in | std::ios::binary);
-
-                if (file.fail())
-                {
-                    // std::cerr << "Fopen failed" << std::endl;
-                    continue;
-                }
-
-                file.seekg(sel->offset);
-                file.read((char *)read_buffer, sel->size);
-                std::streamsize bytes_read = file.gcount();
-                file.close();
-                if (bytes_read != sel->size)
-                {
-                    // std::cerr << "Read failed (short read)" << std::endl;
-                    continue;
-                }
-                read_failed = false;
-                break;
-            }
-
-            // Check for read failure
-            if (read_failed)
-            {
-                // std::cerr << "Read failed (max retries)" << std::endl;
-                free(read_buffer);
-                free(sel);
-                return out;
-            }
-
-            // Decompress
-            size_t decomp_size;
-            char *read_decomp_buffer;
-            pixtype *read_decomp_buffer_pt;
-
-            uint32_t height, width, depth = 0;
-
-            // 1 -> zstd
-            // 2 -> 264
-            // 3 -> AV1
-            switch (compression_type)
-            {
-            case 1:
-                // Decompress with ZSTD
-                read_decomp_buffer = (char *)calloc(out_buffer_size, 1);
-                decomp_size = ZSTD_decompress(read_decomp_buffer, out_buffer_size, read_buffer, sel->size);
-                break;
-
-            case 2:
-            case 3:
-                // Decompress with vidlib 2
-                // read_decomp_buffer_pt = decode_stack_AV1(sizex, sizey, sizez, read_buffer, sel->size);
-                auto decode_result = decode_stack_native(read_buffer, sel->size);
-
-                read_decomp_buffer_pt = std::get<0>(decode_result);
-                decomp_size = std::get<1>(decode_result);
-
-                width = std::get<0>(std::get<2>(decode_result));
-                height = std::get<1>(std::get<2>(decode_result));
-                depth = std::get<2>(std::get<2>(decode_result));
-
-                if (std::get<3>(decode_result) == sizeof(uint8_t))
-                {
-                    read_decomp_buffer = (char *)uint8_to_uint16_crop(read_decomp_buffer_pt, decomp_size, width, height, depth, sizex, sizey, sizez);
-                    decomp_size = sizex * sizey * sizez * sizeof(uint16_t);
-                    free(read_decomp_buffer_pt);
-                }
-                else if (std::get<3>(decode_result) == sizeof(uint16_t))
-                {
-                    read_decomp_buffer = (char *)uint16_to_uint16_crop((uint16_t *)read_decomp_buffer_pt, decomp_size, width, height, depth, sizex, sizey, sizez);
-                    decomp_size = sizex * sizey * sizez * sizeof(uint16_t);
-                    free(read_decomp_buffer_pt);
-                }
-                else
-                {
-                    std::cerr << "decode_stack_native returned unexpected pixel size" << std::endl;
-                }
-
-                break;
-            }
+            auto decode_result = decode_stack_native(read_buffer, sel->size);
+            pixtype *read_decomp_buffer_pt = std::get<0>(decode_result);
+            size_t decomp_size = std::get<1>(decode_result);
+            uint32_t width = std::get<0>(std::get<2>(decode_result));
+            uint32_t height = std::get<1>(std::get<2>(decode_result));
+            uint32_t depth = std::get<2>(std::get<2>(decode_result));
 
             free(read_buffer);
+            free(sel);
 
-            // Copy result
-            memcpy((void *)out, (void *)read_decomp_buffer, decomp_size);
-
-            if (global_chunk_cache_mutex.try_lock_for(cache_lock_timeout))
+            if (std::get<3>(decode_result) == sizeof(uint8_t))
             {
-                global_chunk_line *cache_line = global_chunk_cache + global_chunk_cache_last;
-
-                if (cache_line->ptr != 0)
-                {
-                    free(cache_line->ptr);
-                }
-
-                cache_line->chunk = (size_t)id;
-                cache_line->mchunk = (size_t)this_mchunk_id;
-                cache_line->ptr = (uint16_t *)read_decomp_buffer;
-
-                global_chunk_cache_last++;
-                if (global_chunk_cache_last == global_cache_size)
-                {
-                    global_chunk_cache_last = 0;
-                }
-
-                global_chunk_cache_mutex.unlock();
+                out = (uint16_t *)uint8_to_uint16_crop(read_decomp_buffer_pt, decomp_size, width, height, depth, sizex, sizey, sizez);
+                free(read_decomp_buffer_pt);
+                return out;
+            }
+            else if (std::get<3>(decode_result) == sizeof(uint16_t))
+            {
+                out = (uint16_t *)uint16_to_uint16_crop((uint16_t *)read_decomp_buffer_pt, decomp_size, width, height, depth, sizex, sizey, sizez);
+                free(read_decomp_buffer_pt);
+                return out;
             }
             else
             {
-                free(read_decomp_buffer);
+                std::cerr << "decode_stack_native returned unexpected pixel size" << std::endl;
+                free(read_decomp_buffer_pt);
+                return (uint16_t *)calloc(out_buffer_size, 1);
             }
         }
 
-        free(sel);
+        default:
+            free(read_buffer);
+            free(sel);
+            return (uint16_t *)calloc(out_buffer_size, 1);
+        }
 
+        free(sel);
         return out;
+    }
+
+    // Direct chunk load without global cache - for streaming
+    uint16_t *load_chunk_direct(size_t id, size_t sizex, size_t sizey, size_t sizez)
+    {
+        const size_t out_buffer_size = sizex * sizey * sizez * sizeof(uint16_t);
+        metadata_entry *sel = load_meta_entry(id);
+
+        if (sel->size == 0)
+        {
+            free(sel);
+            return (uint16_t *)calloc(out_buffer_size, 1);
+        }
+
+        uint16_t *read_buffer = (uint16_t *)malloc(sel->size);
+
+        bool read_failed = true;
+        // pread is atomic and thread-safe - no locking needed
+        for (size_t i = 0; i < IO_RETRY_COUNT; i++)
+        {
+            if (data_fd < 0)
+                continue;
+
+            ssize_t bytes_read = pread(data_fd, (char *)read_buffer, sel->size, sel->offset);
+
+            if (bytes_read != (ssize_t)sel->size)
+                continue;
+
+            read_failed = false;
+            break;
+        }
+
+        if (read_failed)
+        {
+            free(read_buffer);
+            free(sel);
+            return (uint16_t *)calloc(out_buffer_size, 1);
+        }
+
+        uint16_t *out;
+
+        switch (compression_type)
+        {
+        case 1:
+            // ZSTD: decompress directly to output buffer (avoid extra copy)
+            out = (uint16_t *)calloc(out_buffer_size, 1);
+            ZSTD_decompress(out, out_buffer_size, read_buffer, sel->size);
+            free(read_buffer);
+            free(sel);
+            return out;
+
+        case 2:
+        case 3:
+        {
+            auto decode_result = decode_stack_native(read_buffer, sel->size);
+            pixtype *read_decomp_buffer_pt = std::get<0>(decode_result);
+            size_t decomp_size = std::get<1>(decode_result);
+            uint32_t width = std::get<0>(std::get<2>(decode_result));
+            uint32_t height = std::get<1>(std::get<2>(decode_result));
+            uint32_t depth = std::get<2>(std::get<2>(decode_result));
+
+            free(read_buffer);
+            free(sel);
+
+            if (std::get<3>(decode_result) == sizeof(uint8_t))
+            {
+                // uint8_to_uint16_crop allocates and returns new buffer
+                out = (uint16_t *)uint8_to_uint16_crop(read_decomp_buffer_pt, decomp_size, width, height, depth, sizex, sizey, sizez);
+                free(read_decomp_buffer_pt);
+                return out;
+            }
+            else if (std::get<3>(decode_result) == sizeof(uint16_t))
+            {
+                // uint16_to_uint16_crop allocates and returns new buffer
+                out = (uint16_t *)uint16_to_uint16_crop((uint16_t *)read_decomp_buffer_pt, decomp_size, width, height, depth, sizex, sizey, sizez);
+                free(read_decomp_buffer_pt);
+                return out;
+            }
+            else
+            {
+                std::cerr << "decode_stack_native returned unexpected pixel size" << std::endl;
+                free(read_decomp_buffer_pt);
+                return (uint16_t *)calloc(out_buffer_size, 1);
+            }
+        }
+
+        default:
+            free(read_buffer);
+            free(sel);
+            return (uint16_t *)calloc(out_buffer_size, 1);
+        }
     }
 
     void overwrite_chunk(size_t id, uint16_t *data, size_t data_size)
     {
-        // compress data using ZSTD
+        // Compress data using ZSTD
         size_t compressed_size = ZSTD_compressBound(data_size);
         void *compressed_data = malloc(compressed_size);
 
@@ -485,47 +503,27 @@ public:
             return;
         }
 
+        // Write to file (append to end)
+        std::fstream file(data_fname, std::ios::in | std::ios::out | std::ios::binary);
+        if (file.fail())
         {
-            global_chunk_cache_mutex.lock();
-
-            // Write to file
-            std::fstream file(data_fname, std::ios::in | std::ios::out | std::ios::binary);
-            if (file.fail())
-            {
-                std::cerr << "Fopen failed (write)" << std::endl;
-                free(compressed_data);
-                return;
-            }
-
-            file.seekp(0, std::ios::end);
-            size_t new_offset = file.tellp();
-            // file.seekp(sel->offset);
-            file.write((char *)compressed_data, compressed_size);
-            file.close();
-
-            metadata_entry *new_entry = (metadata_entry *)malloc(sizeof(metadata_entry));
-            new_entry->offset = new_offset;
-            new_entry->size = compressed_size;
-
-            replace_meta_entry(id, new_entry);
-            free(new_entry);
-
-            // Delete the prexisting values in the cache
-            for (size_t i = 0; i < global_cache_size; i++)
-            {
-                if (global_chunk_cache[i].chunk == id)
-                {
-                    if (global_chunk_cache[i].mchunk == this_mchunk_id)
-                    {
-                        if (global_chunk_cache[i].ptr != 0)
-                            free(global_chunk_cache[i].ptr);
-                        global_chunk_cache[i].ptr = 0;
-                    }
-                }
-            }
-
-            global_chunk_cache_mutex.unlock();
+            std::cerr << "Fopen failed (write)" << std::endl;
+            free(compressed_data);
+            return;
         }
+
+        file.seekp(0, std::ios::end);
+        size_t new_offset = file.tellp();
+        file.write((char *)compressed_data, compressed_size);
+        file.close();
+
+        // Update metadata entry with new offset/size
+        metadata_entry *new_entry = (metadata_entry *)malloc(sizeof(metadata_entry));
+        new_entry->offset = new_offset;
+        new_entry->size = compressed_size;
+
+        replace_meta_entry(id, new_entry);
+        free(new_entry);
 
         free(compressed_data);
     }
@@ -663,7 +661,10 @@ public:
         load_protection();
     }
 
-    ~archive_reader() {}
+    ~archive_reader()
+    {
+        clear_mchunk_buffer();
+    }
 
     // Return true if the contents of filters allows access to this dataset
     bool verify_protection(std::vector<std::pair<std::string, std::string>> filters)
@@ -1152,43 +1153,90 @@ public:
         return sizeof(uint16_t);
     }
 
+    static const size_t MAX_MCHUNK_BUFFER_SIZE = 256;
     std::map<std::tuple<size_t, size_t, size_t, size_t, size_t>, packed_reader *> mchunk_buffer;
-    std::mutex mchunk_buffer_mutex;
+    std::deque<std::tuple<size_t, size_t, size_t, size_t, size_t>> mchunk_lru;
+    std::shared_mutex mchunk_buffer_mutex;  // Reader-writer lock for concurrent reads
+
+    void clear_mchunk_buffer()
+    {
+        std::unique_lock<std::shared_mutex> lock(mchunk_buffer_mutex);
+        for (auto &pair : mchunk_buffer)
+        {
+            if (pair.second != nullptr)
+            {
+                delete pair.second;
+            }
+        }
+        mchunk_buffer.clear();
+        mchunk_lru.clear();
+    }
+
     packed_reader *get_mchunk(size_t scale, size_t channel, size_t i, size_t j, size_t k)
     {
         std::tuple<size_t, size_t, size_t, size_t, size_t> id_tuple = std::make_tuple(scale, channel, i, j, k);
 
-        mchunk_buffer_mutex.lock();
-
-        packed_reader *out = mchunk_buffer[id_tuple];
-
-        if (out == 0 || out == nullptr)
+        // Fast path: read-only lookup (multiple threads can read concurrently)
         {
-            std::stringstream ss;
-            ss << "chunk_" << i << '_' << j << '_' << k << '.' << channel << '.' << scale << 'X';
-            const std::string chunk_root = ss.str();
-
-            const std::string chunk_meta_name = fname + "/meta/" + chunk_root + ".meta";
-            const std::string chunk_data_name = fname + "/data/" + chunk_root + ".data";
-
-            mchunk_uuid_mutex.lock();
-            size_t random_id = mchunk_uuid;
-            mchunk_uuid++;
-            mchunk_uuid_mutex.unlock();
-
-            out = new packed_reader(random_id, chunk_meta_name, chunk_data_name);
-
-            if (!out->is_valid)
+            std::shared_lock<std::shared_mutex> read_lock(mchunk_buffer_mutex);
+            auto it = mchunk_buffer.find(id_tuple);
+            if (it != mchunk_buffer.end() && it->second != nullptr)
             {
-                delete out;
-                out = nullptr;
+                return it->second;
             }
-
-            mchunk_buffer[id_tuple] = out;
         }
-        mchunk_buffer_mutex.unlock();
 
-        return out;
+        // Slow path: need to create new entry (exclusive lock)
+        // Build the reader OUTSIDE the lock to minimize lock time
+        std::stringstream ss;
+        ss << "chunk_" << i << '_' << j << '_' << k << '.' << channel << '.' << scale << 'X';
+        const std::string chunk_root = ss.str();
+        const std::string chunk_meta_name = fname + "/meta/" + chunk_root + ".meta";
+        const std::string chunk_data_name = fname + "/data/" + chunk_root + ".data";
+
+        size_t random_id = mchunk_uuid.fetch_add(1);  // Atomic increment, no lock needed
+
+        packed_reader *new_reader = new packed_reader(random_id, chunk_meta_name, chunk_data_name);
+
+        if (!new_reader->is_valid)
+        {
+            delete new_reader;
+            new_reader = nullptr;
+        }
+
+        // Now acquire exclusive lock to insert
+        std::unique_lock<std::shared_mutex> write_lock(mchunk_buffer_mutex);
+
+        // Double-check: another thread may have inserted while we were creating
+        auto it = mchunk_buffer.find(id_tuple);
+        if (it != mchunk_buffer.end() && it->second != nullptr)
+        {
+            // Another thread beat us - discard our reader and use theirs
+            if (new_reader != nullptr)
+                delete new_reader;
+            return it->second;
+        }
+
+        // Evict oldest entries if buffer is full
+        while (mchunk_buffer.size() >= MAX_MCHUNK_BUFFER_SIZE && !mchunk_lru.empty())
+        {
+            auto oldest = mchunk_lru.front();
+            mchunk_lru.pop_front();
+            auto evict_it = mchunk_buffer.find(oldest);
+            if (evict_it != mchunk_buffer.end())
+            {
+                if (evict_it->second != nullptr)
+                {
+                    delete evict_it->second;
+                }
+                mchunk_buffer.erase(evict_it);
+            }
+        }
+
+        mchunk_buffer[id_tuple] = new_reader;
+        mchunk_lru.push_back(id_tuple);
+
+        return new_reader;
     }
 
     uint16_t *load_region(
@@ -1210,157 +1258,129 @@ public:
 
         if (type == SISF)
         {
-            // Define map for storing already decompressed chunks
-            std::map<std::tuple<size_t, size_t, size_t, size_t, size_t>, uint16_t *> chunk_cache;
-            std::set<std::tuple<size_t, size_t, size_t, size_t, size_t>> back_mchunks;
-
             // Scaled metachunk size
             const size_t mcx = mchunkx / scale;
             const size_t mcy = mchunky / scale;
             const size_t mcz = mchunkz / scale;
 
-            // Variables to store chunk reader and data (shared in loop)
-            packed_reader *chunk_reader = nullptr;
-            std::tuple<size_t, size_t, size_t, size_t, size_t> *chunk_identifier = nullptr;
-            size_t sub_chunk_id;
-            uint16_t *chunk;
+            // Calculate mchunk index ranges that overlap the request
+            const size_t mx_start = xs / mcx;
+            const size_t mx_end = (xe - 1) / mcx;
+            const size_t my_start = ys / mcy;
+            const size_t my_end = (ye - 1) / mcy;
+            const size_t mz_start = zs / mcz;
+            const size_t mz_end = (ze - 1) / mcz;
 
-            // Variables for tracking the last chunks that were used
-            size_t last_x, last_y, last_z, last_sub, last_c;
-            size_t cxmin, cxmax, cxsize;
-            size_t cymin, cymax, cysize;
-            size_t czmin, czmax, czsize;
-
+            // Iterate by channel, then by mchunk
             for (size_t c = 0; c < channel_count; c++)
             {
-                for (size_t i = xs; i < xe; i++)
+                const size_t c_offset = c * osizex * osizey * osizez;
+
+                for (size_t mx = mx_start; mx <= mx_end; mx++)
                 {
-                    const size_t xmin = mcx * (i / mcx);                             // lower bound of mchunk
-                    const size_t xmax = std::min((size_t)xmin + mcx, (size_t)sizex); // upper bound of mchunk
-                    const size_t xsize = xmax - xmin;                                // size of mchunk
-                    const size_t chunk_id_x = i / ((size_t)mcx);                     // mchunk x id
-                    const size_t x_in_chunk = i - xmin;                              // x displacement inside chunk
+                    const size_t mchunk_xs = mx * mcx;
+                    const size_t mchunk_xe = std::min(mchunk_xs + mcx, sizex);
+                    const size_t overlap_xs = std::max(xs, mchunk_xs);
+                    const size_t overlap_xe = std::min(xe, mchunk_xe);
 
-                    for (size_t j = ys; j < ye; j++)
+                    for (size_t my = my_start; my <= my_end; my++)
                     {
-                        const size_t ymin = mcy * (j / mcy);
-                        const size_t ymax = std::min((size_t)ymin + mcy, (size_t)sizey);
-                        const size_t ysize = ymax - ymin;
-                        const size_t chunk_id_y = j / ((size_t)mcy);
-                        const size_t y_in_chunk = j - ymin;
+                        const size_t mchunk_ys = my * mcy;
+                        const size_t mchunk_ye = std::min(mchunk_ys + mcy, sizey);
+                        const size_t overlap_ys = std::max(ys, mchunk_ys);
+                        const size_t overlap_ye = std::min(ye, mchunk_ye);
 
-                        for (size_t k = zs; k < ze; k++)
+                        for (size_t mz = mz_start; mz <= mz_end; mz++)
                         {
-                            const size_t zmin = mcz * (k / mcz);
-                            const size_t zmax = std::min((size_t)zmin + mcz, (size_t)sizez);
-                            const size_t zsize = zmax - zmin;
-                            const size_t chunk_id_z = k / ((size_t)mcz);
-                            const size_t z_in_chunk = k - zmin;
+                            const size_t mchunk_zs = mz * mcz;
+                            const size_t mchunk_ze = std::min(mchunk_zs + mcz, sizez);
+                            const size_t overlap_zs = std::max(zs, mchunk_zs);
+                            const size_t overlap_ze = std::min(ze, mchunk_ze);
 
-                            bool force = false;
-                            if (chunk_reader == nullptr ||
-                                chunk_identifier == nullptr ||
-                                last_x != chunk_id_x ||
-                                last_y != chunk_id_y ||
-                                last_z != chunk_id_z ||
-                                last_c != c)
+                            packed_reader *chunk_reader = get_mchunk(scale, c, mx, my, mz);
+                            if (chunk_reader == nullptr)
+                                continue;
+
+                            const size_t scx = chunk_reader->chunkx;
+                            const size_t scy = chunk_reader->chunky;
+                            const size_t scz = chunk_reader->chunkz;
+
+                            // Convert to mchunk-local coordinates with crop offset
+                            const size_t local_xs = (overlap_xs - mchunk_xs) + chunk_reader->cropstartx;
+                            const size_t local_xe = (overlap_xe - mchunk_xs) + chunk_reader->cropstartx;
+                            const size_t local_ys = (overlap_ys - mchunk_ys) + chunk_reader->cropstarty;
+                            const size_t local_ye = (overlap_ye - mchunk_ys) + chunk_reader->cropstarty;
+                            const size_t local_zs = (overlap_zs - mchunk_zs) + chunk_reader->cropstartz;
+                            const size_t local_ze = (overlap_ze - mchunk_zs) + chunk_reader->cropstartz;
+
+                            // Sub-chunk index ranges
+                            const size_t sx_start = local_xs / scx;
+                            const size_t sx_end = (local_xe - 1) / scx;
+                            const size_t sy_start = local_ys / scy;
+                            const size_t sy_end = (local_ye - 1) / scy;
+                            const size_t sz_start = local_zs / scz;
+                            const size_t sz_end = (local_ze - 1) / scz;
+
+                            for (size_t sx = sx_start; sx <= sx_end; sx++)
                             {
-                                force = true;
+                                const size_t schunk_xs = sx * scx;
+                                const size_t schunk_xe = std::min(schunk_xs + scx, chunk_reader->sizex);
+                                const size_t schunk_xsize = schunk_xe - schunk_xs;
+                                const size_t sc_overlap_xs = std::max(local_xs, schunk_xs);
+                                const size_t sc_overlap_xe = std::min(local_xe, schunk_xe);
 
-                                bool is_bad = back_mchunks.count({scale, c, chunk_id_x, chunk_id_y, chunk_id_z}) > 0;
+                                for (size_t sy = sy_start; sy <= sy_end; sy++)
+                                {
+                                    const size_t schunk_ys = sy * scy;
+                                    const size_t schunk_ye = std::min(schunk_ys + scy, chunk_reader->sizey);
+                                    const size_t schunk_ysize = schunk_ye - schunk_ys;
+                                    const size_t sc_overlap_ys = std::max(local_ys, schunk_ys);
+                                    const size_t sc_overlap_ye = std::min(local_ye, schunk_ye);
 
-                                if (!is_bad)
-                                {
-                                    chunk_reader = get_mchunk(scale, c, chunk_id_x, chunk_id_y, chunk_id_z);
-                                }
-                                else
-                                {
-                                    chunk_reader = nullptr;
-                                }
-
-                                if (chunk_reader == nullptr || chunk_reader == 0)
-                                {
-                                    if (!is_bad)
+                                    for (size_t sz = sz_start; sz <= sz_end; sz++)
                                     {
-                                        back_mchunks.insert({scale, c, chunk_id_x, chunk_id_y, chunk_id_z});
+                                        const size_t schunk_zs = sz * scz;
+                                        const size_t schunk_ze = std::min(schunk_zs + scz, chunk_reader->sizez);
+                                        const size_t schunk_zsize = schunk_ze - schunk_zs;
+                                        const size_t sc_overlap_zs = std::max(local_zs, schunk_zs);
+                                        const size_t sc_overlap_ze = std::min(local_ze, schunk_ze);
+
+                                        const size_t sub_chunk_id = (sx * chunk_reader->countz * chunk_reader->county) +
+                                                                    (sy * chunk_reader->countz) + sz;
+                                        uint16_t *chunk = chunk_reader->load_chunk(sub_chunk_id, schunk_xsize, schunk_ysize, schunk_zsize);
+
+                                        // Copy all overlapping pixels
+                                        for (size_t lx = sc_overlap_xs; lx < sc_overlap_xe; lx++)
+                                        {
+                                            const size_t gx = lx - chunk_reader->cropstartx + mchunk_xs;
+                                            const size_t cx = lx - schunk_xs;
+
+                                            for (size_t ly = sc_overlap_ys; ly < sc_overlap_ye; ly++)
+                                            {
+                                                const size_t gy = ly - chunk_reader->cropstarty + mchunk_ys;
+                                                const size_t cy = ly - schunk_ys;
+                                                const size_t chunk_xy_offset = (cx * schunk_ysize * schunk_zsize) + (cy * schunk_zsize);
+                                                const size_t out_xy_base = c_offset + ((gy - ys) * osizex) + (gx - xs);
+
+                                                for (size_t lz = sc_overlap_zs; lz < sc_overlap_ze; lz++)
+                                                {
+                                                    const size_t gz = lz - chunk_reader->cropstartz + mchunk_zs;
+                                                    const size_t cz = lz - schunk_zs;
+                                                    const size_t coffset = chunk_xy_offset + cz;
+                                                    const size_t ooffset = out_xy_base + ((gz - zs) * osizey * osizex);
+
+                                                    out_buffer[ooffset] = chunk[coffset];
+                                                }
+                                            }
+                                        }
+
+                                        free(chunk);
                                     }
-                                    continue;
                                 }
-
-                                last_x = chunk_id_x;
-                                last_y = chunk_id_y;
-                                last_z = chunk_id_z;
                             }
-
-                            // Shift ranges for cropping
-                            const size_t x_in_chunk_offset = x_in_chunk + chunk_reader->cropstartx;
-                            const size_t y_in_chunk_offset = y_in_chunk + chunk_reader->cropstarty;
-                            const size_t z_in_chunk_offset = z_in_chunk + chunk_reader->cropstartz;
-
-                            // Find sub chunk id from coordinates
-                            sub_chunk_id = chunk_reader->find_index(x_in_chunk_offset, y_in_chunk_offset, z_in_chunk_offset);
-
-                            // Only perform this step if there has been a change in chunk
-                            if (force ||
-                                last_sub != sub_chunk_id)
-                            {
-                                // Replace the chunk id with the new one
-                                if (chunk_identifier != nullptr)
-                                {
-                                    delete chunk_identifier;
-                                }
-                                chunk_identifier = new std::tuple(c, chunk_id_x, chunk_id_y, chunk_id_z, sub_chunk_id);
-
-                                // Find the start/stop coordinates of this chunk
-                                cxmin = ((size_t)chunk_reader->chunkx) * (x_in_chunk_offset / ((size_t)chunk_reader->chunkx)); // Minimum value of the chunk
-                                cxmax = std::min((size_t)cxmin + chunk_reader->chunkx, (size_t)chunk_reader->sizex);           // Maximum value of the chunk
-                                cxsize = cxmax - cxmin;                                                                        // Size of the chunk
-
-                                cymin = ((size_t)chunk_reader->chunky) * (y_in_chunk_offset / ((size_t)chunk_reader->chunky));
-                                cymax = std::min((size_t)cymin + chunk_reader->chunky, (size_t)chunk_reader->sizey);
-                                cysize = cymax - cymin;
-
-                                czmin = ((size_t)chunk_reader->chunkz) * (z_in_chunk_offset / ((size_t)chunk_reader->chunkz));
-                                czmax = std::min((size_t)czmin + chunk_reader->chunkz, (size_t)chunk_reader->sizez);
-                                czsize = czmax - czmin;
-
-                                // Check if the chunk is in the tmp cache
-                                chunk = chunk_cache[*chunk_identifier];
-                                if (chunk == 0)
-                                {
-                                    chunk = chunk_reader->load_chunk(sub_chunk_id, cxsize, cysize, czsize);
-                                    chunk_cache[*chunk_identifier] = chunk;
-                                }
-
-                                // Store this ID as the most recent chunk
-                                last_sub = sub_chunk_id;
-                                last_c = c;
-                            }
-
-                            // Calculate the coordinates of the input and output inside their respective buffers
-                            const size_t coffset = ((x_in_chunk_offset - cxmin) * cysize * czsize) + // X
-                                                   ((y_in_chunk_offset - cymin) * czsize) +          // Y
-                                                   (z_in_chunk_offset - czmin);                      // Z
-
-                            const size_t ooffset = (c * osizey * osizex * osizez) + // C
-                                                   ((k - zs) * osizey * osizex) +   // Z
-                                                   ((j - ys) * osizex) +            // Y
-                                                   ((i - xs));                      // X
-
-                            out_buffer[ooffset] = chunk[coffset];
                         }
                     }
                 }
-            }
-
-            if (chunk_identifier != nullptr)
-            {
-                delete chunk_identifier;
-            }
-
-            for (auto it = chunk_cache.begin(); it != chunk_cache.end(); it++)
-            {
-                free(it->second);
             }
         }
         else if (type == ZARR)
@@ -1527,6 +1547,174 @@ public:
             std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
             size_t dt = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
             std::cout << "Time difference = " << dt << " [us]" << std::endl;
+        }
+
+        return out_buffer;
+    }
+
+    // Direct region load without global cache - for streaming endpoint
+    // Optimized: chunk-first iteration eliminates per-pixel overhead
+    uint16_t *load_region_direct(
+        size_t scale,
+        size_t xs, size_t xe,
+        size_t ys, size_t ye,
+        size_t zs, size_t ze)
+    {
+        const size_t osizex = xe - xs;
+        const size_t osizey = ye - ys;
+        const size_t osizez = ze - zs;
+        const size_t buffer_size = osizex * osizey * osizez * sizeof(uint16_t) * channel_count;
+
+        uint16_t *out_buffer = (uint16_t *)calloc(buffer_size, 1);
+
+        if (type != SISF)
+        {
+            // For non-SISF types, fall back to regular load_region
+            uint16_t *tmp = load_region(scale, xs, xe, ys, ye, zs, ze);
+            memcpy(out_buffer, tmp, buffer_size);
+            free(tmp);
+            return out_buffer;
+        }
+
+        // Scaled metachunk size
+        const size_t mcx = mchunkx / scale;
+        const size_t mcy = mchunky / scale;
+        const size_t mcz = mchunkz / scale;
+
+        // Calculate mchunk index ranges that overlap the request
+        const size_t mx_start = xs / mcx;
+        const size_t mx_end = (xe - 1) / mcx;
+        const size_t my_start = ys / mcy;
+        const size_t my_end = (ye - 1) / mcy;
+        const size_t mz_start = zs / mcz;
+        const size_t mz_end = (ze - 1) / mcz;
+
+        // Iterate by channel, then by mchunk
+        for (size_t c = 0; c < channel_count; c++)
+        {
+            const size_t c_offset = c * osizex * osizey * osizez;
+
+            for (size_t mx = mx_start; mx <= mx_end; mx++)
+            {
+                // Mchunk X bounds in global coordinates
+                const size_t mchunk_xs = mx * mcx;
+                const size_t mchunk_xe = std::min(mchunk_xs + mcx, sizex);
+
+                // Overlap with request in global coordinates
+                const size_t overlap_xs = std::max(xs, mchunk_xs);
+                const size_t overlap_xe = std::min(xe, mchunk_xe);
+
+                for (size_t my = my_start; my <= my_end; my++)
+                {
+                    const size_t mchunk_ys = my * mcy;
+                    const size_t mchunk_ye = std::min(mchunk_ys + mcy, sizey);
+                    const size_t overlap_ys = std::max(ys, mchunk_ys);
+                    const size_t overlap_ye = std::min(ye, mchunk_ye);
+
+                    for (size_t mz = mz_start; mz <= mz_end; mz++)
+                    {
+                        const size_t mchunk_zs = mz * mcz;
+                        const size_t mchunk_ze = std::min(mchunk_zs + mcz, sizez);
+                        const size_t overlap_zs = std::max(zs, mchunk_zs);
+                        const size_t overlap_ze = std::min(ze, mchunk_ze);
+
+                        // Get mchunk reader
+                        packed_reader *chunk_reader = get_mchunk(scale, c, mx, my, mz);
+                        if (chunk_reader == nullptr)
+                            continue;
+
+                        // Iterate over sub-chunks within this mchunk
+                        const size_t scx = chunk_reader->chunkx;
+                        const size_t scy = chunk_reader->chunky;
+                        const size_t scz = chunk_reader->chunkz;
+
+                        // Convert overlap to mchunk-local coordinates (with crop offset)
+                        const size_t local_xs = (overlap_xs - mchunk_xs) + chunk_reader->cropstartx;
+                        const size_t local_xe = (overlap_xe - mchunk_xs) + chunk_reader->cropstartx;
+                        const size_t local_ys = (overlap_ys - mchunk_ys) + chunk_reader->cropstarty;
+                        const size_t local_ye = (overlap_ye - mchunk_ys) + chunk_reader->cropstarty;
+                        const size_t local_zs = (overlap_zs - mchunk_zs) + chunk_reader->cropstartz;
+                        const size_t local_ze = (overlap_ze - mchunk_zs) + chunk_reader->cropstartz;
+
+                        // Sub-chunk index ranges
+                        const size_t sx_start = local_xs / scx;
+                        const size_t sx_end = (local_xe - 1) / scx;
+                        const size_t sy_start = local_ys / scy;
+                        const size_t sy_end = (local_ye - 1) / scy;
+                        const size_t sz_start = local_zs / scz;
+                        const size_t sz_end = (local_ze - 1) / scz;
+
+                        for (size_t sx = sx_start; sx <= sx_end; sx++)
+                        {
+                            // Sub-chunk X bounds in mchunk-local coordinates
+                            const size_t schunk_xs = sx * scx;
+                            const size_t schunk_xe = std::min(schunk_xs + scx, chunk_reader->sizex);
+                            const size_t schunk_xsize = schunk_xe - schunk_xs;
+
+                            // Overlap with request (in mchunk-local coords)
+                            const size_t sc_overlap_xs = std::max(local_xs, schunk_xs);
+                            const size_t sc_overlap_xe = std::min(local_xe, schunk_xe);
+
+                            for (size_t sy = sy_start; sy <= sy_end; sy++)
+                            {
+                                const size_t schunk_ys = sy * scy;
+                                const size_t schunk_ye = std::min(schunk_ys + scy, chunk_reader->sizey);
+                                const size_t schunk_ysize = schunk_ye - schunk_ys;
+
+                                const size_t sc_overlap_ys = std::max(local_ys, schunk_ys);
+                                const size_t sc_overlap_ye = std::min(local_ye, schunk_ye);
+
+                                for (size_t sz = sz_start; sz <= sz_end; sz++)
+                                {
+                                    const size_t schunk_zs = sz * scz;
+                                    const size_t schunk_ze = std::min(schunk_zs + scz, chunk_reader->sizez);
+                                    const size_t schunk_zsize = schunk_ze - schunk_zs;
+
+                                    const size_t sc_overlap_zs = std::max(local_zs, schunk_zs);
+                                    const size_t sc_overlap_ze = std::min(local_ze, schunk_ze);
+
+                                    // Load sub-chunk
+                                    const size_t sub_chunk_id = (sx * chunk_reader->countz * chunk_reader->county) +
+                                                                (sy * chunk_reader->countz) + sz;
+                                    uint16_t *chunk = chunk_reader->load_chunk_direct(sub_chunk_id, schunk_xsize, schunk_ysize, schunk_zsize);
+
+                                    // Copy all overlapping pixels with tight loops
+                                    // Chunk layout: [X][Y][Z] - Z contiguous
+                                    // Output layout: [C][Z][Y][X] - X contiguous
+                                    for (size_t lx = sc_overlap_xs; lx < sc_overlap_xe; lx++)
+                                    {
+                                        const size_t gx = lx - chunk_reader->cropstartx + mchunk_xs; // Global X
+                                        const size_t cx = lx - schunk_xs; // Chunk-local X
+
+                                        for (size_t ly = sc_overlap_ys; ly < sc_overlap_ye; ly++)
+                                        {
+                                            const size_t gy = ly - chunk_reader->cropstarty + mchunk_ys;
+                                            const size_t cy = ly - schunk_ys;
+
+                                            // Pre-compute partial offsets
+                                            const size_t chunk_xy_offset = (cx * schunk_ysize * schunk_zsize) + (cy * schunk_zsize);
+                                            const size_t out_xy_base = c_offset + ((gy - ys) * osizex) + (gx - xs);
+
+                                            for (size_t lz = sc_overlap_zs; lz < sc_overlap_ze; lz++)
+                                            {
+                                                const size_t gz = lz - chunk_reader->cropstartz + mchunk_zs;
+                                                const size_t cz = lz - schunk_zs;
+
+                                                const size_t coffset = chunk_xy_offset + cz;
+                                                const size_t ooffset = out_xy_base + ((gz - zs) * osizey * osizex);
+
+                                                out_buffer[ooffset] = chunk[coffset];
+                                            }
+                                        }
+                                    }
+
+                                    free(chunk);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         return out_buffer;

@@ -29,6 +29,7 @@
 #include <list>
 #include <tuple>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <vector>
 #include <queue>
@@ -51,7 +52,7 @@ typedef std::tuple<float, float, float, float, int> swc_line;
 typedef std::tuple<int, float, float, float, float, int> swc_line_input;
 
 std::unordered_map<std::string, archive_reader *> archive_inventory;
-std::mutex archive_inventory_mutex;
+std::shared_mutex archive_inventory_mutex;
 
 // Forward declaration
 archive_reader *search_inventory(std::string key);
@@ -376,25 +377,33 @@ void load_inventory()
 
 archive_reader *search_inventory(std::string key)
 {
-	auto archive_search = archive_inventory.find(key);
-	if (archive_search != archive_inventory.end())
+	// Fast path: read-only lookup (multiple threads can read concurrently)
 	{
-		if (archive_search->second->is_valid)
+		std::shared_lock<std::shared_mutex> read_lock(archive_inventory_mutex);
+		auto archive_search = archive_inventory.find(key);
+		if (archive_search != archive_inventory.end() && archive_search->second->is_valid)
 		{
 			return archive_search->second;
 		}
 	}
 
+	// Slow path: reload inventory from disk (exclusive lock)
 	{
-		// Lock changes and check disk for new inventory
-		std::lock_guard<std::mutex> lock(archive_inventory_mutex);
+		std::unique_lock<std::shared_mutex> write_lock(archive_inventory_mutex);
+		// Double-check after acquiring write lock
+		auto archive_search = archive_inventory.find(key);
+		if (archive_search != archive_inventory.end() && archive_search->second->is_valid)
+		{
+			return archive_search->second;
+		}
 		load_inventory();
 	}
 
-	archive_search = archive_inventory.find(key);
-	if (archive_search != archive_inventory.end())
+	// Check again with read lock
 	{
-		if (archive_search->second->is_valid)
+		std::shared_lock<std::shared_mutex> read_lock(archive_inventory_mutex);
+		auto archive_search = archive_inventory.find(key);
+		if (archive_search != archive_inventory.end() && archive_search->second->is_valid)
 		{
 			return archive_search->second;
 		}
@@ -484,33 +493,34 @@ int main(int argc, char *argv[])
 		out << "\t<th>Counter Name</th><th>Size</th><th>Average (&micro;s)</th><th>Std. Dev. (&micro;s)</th><th>N</th>\n";
 		out << "</tr>\n";
 
-		perf_counter_mutex.lock();
-		for(const auto &a : perf_counters) {
-			// Skip line if empty
-			if(a.second.size() == 0) continue;
+		{
+			std::shared_lock<std::shared_mutex> lock(perf_counter_mutex);  // Read-only: shared lock
+			for(const auto &a : perf_counters) {
+				// Skip line if empty
+				if(a.second.size() == 0) continue;
 
-			double mu = 0;
-			for(size_t a : a.second) {
-				mu += a;
+				double mu = 0;
+				for(size_t a : a.second) {
+					mu += a;
+				}
+				mu /= a.second.size();
+
+				double std = 0;
+				for(size_t a : a.second) {
+					std += pow(((double) a) - mu, 2);
+				}
+				std /= a.second.size();
+				std = pow(std, 0.5);
+
+				out << "<tr>\n";
+				out << "\t<td>" << std::get<0>(a.first) << " / " << std::get<1>(a.first) << " / " << std::get<2>(a.first) << "</td>\n";
+				out << "\t<td>" << std::get<3>(a.first) << "&times;" << std::get<4>(a.first) << "&times;" << std::get<5>(a.first) << "</td>\n";
+				out << "\t<td>" << mu << "</td>\n";
+				out << "\t<td>" << std << "</td>\n";
+				out << "\t<td>" << a.second.size() << "</td>\n";
+				out << "</tr>\n";
 			}
-			mu /= a.second.size();
-
-			double std = 0;
-			for(size_t a : a.second) {
-				std += pow(((double) a) - mu, 2);
-			}
-			std /= a.second.size();
-			std = pow(std, 0.5);
-
-			out << "<tr>\n";
-			out << "\t<td>" << std::get<0>(a.first) << " / " << std::get<1>(a.first) << " / " << std::get<2>(a.first) << "</td>\n";
-			out << "\t<td>" << std::get<3>(a.first) << "&times;" << std::get<4>(a.first) << "&times;" << std::get<5>(a.first) << "</td>\n";
-			out << "\t<td>" << mu << "</td>\n";
-			out << "\t<td>" << std << "</td>\n";
-			out << "\t<td>" << a.second.size() << "</td>\n";
-			out << "</tr>\n";
 		}
-		perf_counter_mutex.unlock();
 
 		out << "</table>\n";
 		out << "</body>\n";
@@ -534,14 +544,15 @@ int main(int argc, char *argv[])
 		out << "\t<th>IP</th><th>N</th>\n";
 		out << "</tr>\n";
 
-		//perf_counter_mutex.lock();
-		for(const auto &a : ip_counter) {
-			out << "<tr>\n";
-			out << "\t<td>" << a.first << "</td>\n";
-			out << "\t<td>" << a.second << "</td>\n";
-			out << "</tr>\n";
+		{
+			std::lock_guard<std::mutex> lock(ip_counter_mutex);
+			for(const auto &a : ip_counter) {
+				out << "<tr>\n";
+				out << "\t<td>" << a.first << "</td>\n";
+				out << "\t<td>" << a.second << "</td>\n";
+				out << "</tr>\n";
+			}
 		}
-		//perf_counter_mutex.unlock();
 
 		out << "</table>\n";
 		out << "</body>\n";
@@ -2079,8 +2090,7 @@ int main(int argc, char *argv[])
 			return;
 		}
 
-		const size_t channel_count = reader->channel_count;
-		const size_t total_size = sizeof(uint16_t) * sx * sy * sz * channel_count;
+		const size_t total_size = sizeof(uint16_t) * sx * sy * sz * reader->channel_count;
 
 		// Parse Range header
 		size_t range_start = 0;
@@ -2109,8 +2119,8 @@ int main(int argc, char *argv[])
 
 		const size_t content_length = range_end - range_start + 1;
 
-		// Load the full region
-		uint16_t *out_buffer = reader->load_region(scale, x_begin, x_end, y_begin, y_end, z_begin, z_end);
+		// Load the full region (direct, no global cache)
+		uint16_t *out_buffer = reader->load_region_direct(scale, x_begin, x_end, y_begin, y_end, z_begin, z_end);
 
 		if (out_buffer == nullptr) {
 			res.code = crow::status::INTERNAL_SERVER_ERROR;
@@ -2129,8 +2139,8 @@ int main(int argc, char *argv[])
 				std::to_string(range_end) + "/" + std::to_string(total_size));
 		}
 
-		// Send the requested byte range
-		res.body = std::string((char *)out_buffer + range_start, content_length);
+		// Send the requested byte range (assign directly, avoid temporary string)
+		res.body.assign((char *)out_buffer + range_start, content_length);
 		free(out_buffer);
 
 		res.end();
