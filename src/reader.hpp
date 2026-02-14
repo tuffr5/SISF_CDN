@@ -63,9 +63,14 @@
 
 #define CHUNK_TIMER 0
 #define DEBUG_SLICING 0
+#define DEBUG_STREAM 1  // Enable detailed timing for stream requests
 #define IO_RETRY_COUNT 5
 
 std::atomic<size_t> mchunk_uuid{0};
+
+// Debug counters for cache performance
+std::atomic<size_t> mchunk_cache_hits{0};
+std::atomic<size_t> mchunk_cache_misses{0};
 
 enum ArchiveType
 {
@@ -1182,9 +1187,11 @@ public:
             auto it = mchunk_buffer.find(id_tuple);
             if (it != mchunk_buffer.end() && it->second != nullptr)
             {
+                if (DEBUG_STREAM) mchunk_cache_hits.fetch_add(1);
                 return it->second;
             }
         }
+        if (DEBUG_STREAM) mchunk_cache_misses.fetch_add(1);
 
         // Slow path: need to create new entry (exclusive lock)
         // Build the reader OUTSIDE the lock to minimize lock time
@@ -1560,6 +1567,12 @@ public:
         size_t ys, size_t ye,
         size_t zs, size_t ze)
     {
+        std::chrono::steady_clock::time_point t_start, t_end;
+        size_t time_get_mchunk = 0, time_load_chunk = 0, time_copy = 0;
+        size_t chunks_loaded = 0, mchunks_accessed = 0;
+
+        if (DEBUG_STREAM) t_start = std::chrono::steady_clock::now();
+
         const size_t osizex = xe - xs;
         const size_t osizey = ye - ys;
         const size_t osizez = ze - zs;
@@ -1619,7 +1632,13 @@ public:
                         const size_t overlap_ze = std::min(ze, mchunk_ze);
 
                         // Get mchunk reader
+                        if (DEBUG_STREAM) t_start = std::chrono::steady_clock::now();
                         packed_reader *chunk_reader = get_mchunk(scale, c, mx, my, mz);
+                        if (DEBUG_STREAM) {
+                            t_end = std::chrono::steady_clock::now();
+                            time_get_mchunk += std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
+                            mchunks_accessed++;
+                        }
                         if (chunk_reader == nullptr)
                             continue;
 
@@ -1676,36 +1695,64 @@ public:
                                     // Load sub-chunk
                                     const size_t sub_chunk_id = (sx * chunk_reader->countz * chunk_reader->county) +
                                                                 (sy * chunk_reader->countz) + sz;
-                                    uint16_t *chunk = chunk_reader->load_chunk_direct(sub_chunk_id, schunk_xsize, schunk_ysize, schunk_zsize);
 
-                                    // Copy all overlapping pixels with tight loops
+                                    if (DEBUG_STREAM) t_start = std::chrono::steady_clock::now();
+                                    uint16_t *chunk = chunk_reader->load_chunk_direct(sub_chunk_id, schunk_xsize, schunk_ysize, schunk_zsize);
+                                    if (DEBUG_STREAM) {
+                                        t_end = std::chrono::steady_clock::now();
+                                        time_load_chunk += std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
+                                        chunks_loaded++;
+                                    }
+
+                                    if (DEBUG_STREAM) t_start = std::chrono::steady_clock::now();
+                                    // Copy all overlapping pixels - OPTIMIZED
                                     // Chunk layout: [X][Y][Z] - Z contiguous
                                     // Output layout: [C][Z][Y][X] - X contiguous
-                                    for (size_t lx = sc_overlap_xs; lx < sc_overlap_xe; lx++)
+                                    //
+                                    // Loop order Z-outer, Y-middle, X-inner for contiguous output writes
+                                    // This makes writes cache-friendly (X contiguous in output)
+
+                                    // Pre-compute constants outside all loops
+                                    const size_t out_z_stride = osizey * osizex;
+                                    const size_t chunk_x_stride = schunk_ysize * schunk_zsize;
+                                    const size_t crop_x_offset = chunk_reader->cropstartx;
+                                    const size_t crop_y_offset = chunk_reader->cropstarty;
+                                    const size_t crop_z_offset = chunk_reader->cropstartz;
+
+                                    // Pre-compute range info
+                                    const size_t x_count = sc_overlap_xe - sc_overlap_xs;
+                                    const size_t cx_start = sc_overlap_xs - schunk_xs;
+                                    const size_t gx_start = sc_overlap_xs - crop_x_offset + mchunk_xs;
+
+                                    for (size_t lz = sc_overlap_zs; lz < sc_overlap_ze; lz++)
                                     {
-                                        const size_t gx = lx - chunk_reader->cropstartx + mchunk_xs; // Global X
-                                        const size_t cx = lx - schunk_xs; // Chunk-local X
+                                        const size_t gz = lz - crop_z_offset + mchunk_zs;
+                                        const size_t cz = lz - schunk_zs;
+                                        const size_t out_z_base = c_offset + ((gz - zs) * out_z_stride);
 
                                         for (size_t ly = sc_overlap_ys; ly < sc_overlap_ye; ly++)
                                         {
-                                            const size_t gy = ly - chunk_reader->cropstarty + mchunk_ys;
+                                            const size_t gy = ly - crop_y_offset + mchunk_ys;
                                             const size_t cy = ly - schunk_ys;
 
-                                            // Pre-compute partial offsets
-                                            const size_t chunk_xy_offset = (cx * schunk_ysize * schunk_zsize) + (cy * schunk_zsize);
-                                            const size_t out_xy_base = c_offset + ((gy - ys) * osizex) + (gx - xs);
+                                            // Output row base (X will be contiguous from here)
+                                            uint16_t* out_row = out_buffer + out_z_base + ((gy - ys) * osizex) + (gx_start - xs);
 
-                                            for (size_t lz = sc_overlap_zs; lz < sc_overlap_ze; lz++)
+                                            // Chunk base for this Y,Z slice
+                                            const size_t chunk_yz_base = cy * schunk_zsize + cz;
+
+                                            // Inner X loop - writes are now contiguous!
+                                            for (size_t i = 0; i < x_count; i++)
                                             {
-                                                const size_t gz = lz - chunk_reader->cropstartz + mchunk_zs;
-                                                const size_t cz = lz - schunk_zs;
-
-                                                const size_t coffset = chunk_xy_offset + cz;
-                                                const size_t ooffset = out_xy_base + ((gz - zs) * osizey * osizex);
-
-                                                out_buffer[ooffset] = chunk[coffset];
+                                                const size_t cx = cx_start + i;
+                                                const size_t coffset = cx * chunk_x_stride + chunk_yz_base;
+                                                out_row[i] = chunk[coffset];
                                             }
                                         }
+                                    }
+                                    if (DEBUG_STREAM) {
+                                        t_end = std::chrono::steady_clock::now();
+                                        time_copy += std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
                                     }
 
                                     free(chunk);
@@ -1715,6 +1762,16 @@ public:
                     }
                 }
             }
+        }
+
+        if (DEBUG_STREAM) {
+            std::cerr << "[STREAM DEBUG] region=" << osizex << "x" << osizey << "x" << osizez
+                      << " mchunks=" << mchunks_accessed << " chunks=" << chunks_loaded
+                      << " | get_mchunk=" << time_get_mchunk << "us"
+                      << " load_chunk=" << time_load_chunk << "us"
+                      << " copy=" << time_copy << "us"
+                      << " total=" << (time_get_mchunk + time_load_chunk + time_copy) << "us"
+                      << std::endl;
         }
 
         return out_buffer;

@@ -523,6 +523,14 @@ int main(int argc, char *argv[])
 		}
 
 		out << "</table>\n";
+
+		// Cache stats
+		size_t hits = mchunk_cache_hits.load();
+		size_t misses = mchunk_cache_misses.load();
+		double hit_rate = (hits + misses > 0) ? (100.0 * hits / (hits + misses)) : 0.0;
+		out << "<h3>MChunk Cache Stats</h3>\n";
+		out << "<p>Hits: " << hits << ", Misses: " << misses << ", Hit Rate: " << hit_rate << "%</p>\n";
+
 		out << "</body>\n";
 		out << "</html>";
 
@@ -2464,7 +2472,7 @@ int main(int argc, char *argv[])
 			//.use_compression(crow::compression::algorithm::GZIP)
 			.concurrency(THREAD_COUNT)
 			//.multithreaded()
-			.loglevel(crow::LogLevel::Warning)
+			.loglevel(crow::LogLevel::Debug)
 			.timeout(5)
 			.run();
 	}
