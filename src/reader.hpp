@@ -72,6 +72,14 @@ std::atomic<size_t> mchunk_uuid{0};
 std::atomic<size_t> mchunk_cache_hits{0};
 std::atomic<size_t> mchunk_cache_misses{0};
 
+// Detailed timing counters (microseconds, cumulative)
+std::atomic<size_t> time_meta_lookup_us{0};
+std::atomic<size_t> time_pread_us{0};
+std::atomic<size_t> time_decompress_us{0};
+std::atomic<size_t> time_lock_wait_us{0};
+std::atomic<size_t> time_file_open_us{0};
+std::atomic<size_t> chunk_load_count{0};
+
 enum ArchiveType
 {
     SISF_JSON,
@@ -406,8 +414,17 @@ public:
     // Direct chunk load without global cache - for streaming
     uint16_t *load_chunk_direct(size_t id, size_t sizex, size_t sizey, size_t sizez)
     {
+        std::chrono::steady_clock::time_point t0, t1;
+
         const size_t out_buffer_size = sizex * sizey * sizez * sizeof(uint16_t);
+
+        // Time: metadata lookup
+        if (DEBUG_STREAM) t0 = std::chrono::steady_clock::now();
         metadata_entry *sel = load_meta_entry(id);
+        if (DEBUG_STREAM) {
+            t1 = std::chrono::steady_clock::now();
+            time_meta_lookup_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+        }
 
         if (sel->size == 0)
         {
@@ -419,6 +436,7 @@ public:
 
         bool read_failed = true;
         // pread is atomic and thread-safe - no locking needed
+        if (DEBUG_STREAM) t0 = std::chrono::steady_clock::now();
         for (size_t i = 0; i < IO_RETRY_COUNT; i++)
         {
             if (data_fd < 0)
@@ -432,6 +450,10 @@ public:
             read_failed = false;
             break;
         }
+        if (DEBUG_STREAM) {
+            t1 = std::chrono::steady_clock::now();
+            time_pread_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+        }
 
         if (read_failed)
         {
@@ -442,6 +464,9 @@ public:
 
         uint16_t *out;
 
+        // Time: decompression
+        if (DEBUG_STREAM) t0 = std::chrono::steady_clock::now();
+
         switch (compression_type)
         {
         case 1:
@@ -450,6 +475,11 @@ public:
             ZSTD_decompress(out, out_buffer_size, read_buffer, sel->size);
             free(read_buffer);
             free(sel);
+            if (DEBUG_STREAM) {
+                t1 = std::chrono::steady_clock::now();
+                time_decompress_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+                chunk_load_count.fetch_add(1);
+            }
             return out;
 
         case 2:
@@ -464,6 +494,12 @@ public:
 
             free(read_buffer);
             free(sel);
+
+            if (DEBUG_STREAM) {
+                t1 = std::chrono::steady_clock::now();
+                time_decompress_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+                chunk_load_count.fetch_add(1);
+            }
 
             if (std::get<3>(decode_result) == sizeof(uint8_t))
             {
@@ -1179,11 +1215,17 @@ public:
 
     packed_reader *get_mchunk(size_t scale, size_t channel, size_t i, size_t j, size_t k)
     {
+        std::chrono::steady_clock::time_point t0, t1;
         std::tuple<size_t, size_t, size_t, size_t, size_t> id_tuple = std::make_tuple(scale, channel, i, j, k);
 
         // Fast path: read-only lookup (multiple threads can read concurrently)
+        if (DEBUG_STREAM) t0 = std::chrono::steady_clock::now();
         {
             std::shared_lock<std::shared_mutex> read_lock(mchunk_buffer_mutex);
+            if (DEBUG_STREAM) {
+                t1 = std::chrono::steady_clock::now();
+                time_lock_wait_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+            }
             auto it = mchunk_buffer.find(id_tuple);
             if (it != mchunk_buffer.end() && it->second != nullptr)
             {
@@ -1203,7 +1245,13 @@ public:
 
         size_t random_id = mchunk_uuid.fetch_add(1);  // Atomic increment, no lock needed
 
+        // Time: file open (packed_reader constructor opens files)
+        if (DEBUG_STREAM) t0 = std::chrono::steady_clock::now();
         packed_reader *new_reader = new packed_reader(random_id, chunk_meta_name, chunk_data_name);
+        if (DEBUG_STREAM) {
+            t1 = std::chrono::steady_clock::now();
+            time_file_open_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+        }
 
         if (!new_reader->is_valid)
         {
@@ -1212,7 +1260,12 @@ public:
         }
 
         // Now acquire exclusive lock to insert
+        if (DEBUG_STREAM) t0 = std::chrono::steady_clock::now();
         std::unique_lock<std::shared_mutex> write_lock(mchunk_buffer_mutex);
+        if (DEBUG_STREAM) {
+            t1 = std::chrono::steady_clock::now();
+            time_lock_wait_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+        }
 
         // Double-check: another thread may have inserted while we were creating
         auto it = mchunk_buffer.find(id_tuple);
