@@ -463,6 +463,28 @@ int main(int argc, char *argv[])
 	([]()
 	 { return VERSION_STRING; });
 
+	// Cache invalidation for a specific dataset
+	CROW_ROUTE(app, "/<string>/invalidate_cache").methods("POST"_method)
+	([](std::string data_id)
+	 {
+		archive_reader *reader = search_inventory(data_id);
+		if (reader == nullptr)
+		{
+			json response;
+			response["status"] = "error";
+			response["message"] = "Dataset not found: " + data_id;
+			return crow::response(404, response.dump());
+		}
+
+		reader->clear_mchunk_buffer();
+		CROW_LOG_INFO << "[CACHE] Invalidated mchunk_buffer for dataset: " << data_id;
+
+		json response;
+		response["status"] = "ok";
+		response["dataset"] = data_id;
+		return crow::response(200, response.dump());
+	 });
+
 	CROW_ROUTE(app, "/debug_headers")
 	(
 		[](const crow::request &req)
@@ -2472,7 +2494,7 @@ int main(int argc, char *argv[])
 			//.use_compression(crow::compression::algorithm::GZIP)
 			.concurrency(THREAD_COUNT)
 			//.multithreaded()
-			.loglevel(crow::LogLevel::Debug)
+			.loglevel(crow::LogLevel::Warning)
 			.timeout(5)
 			.run();
 	}
