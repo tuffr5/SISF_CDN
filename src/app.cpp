@@ -463,28 +463,6 @@ int main(int argc, char *argv[])
 	([]()
 	 { return VERSION_STRING; });
 
-	// Cache invalidation for a specific dataset
-	CROW_ROUTE(app, "/<string>/invalidate_cache").methods("POST"_method)
-	([](std::string data_id)
-	 {
-		archive_reader *reader = search_inventory(data_id);
-		if (reader == nullptr)
-		{
-			json response;
-			response["status"] = "error";
-			response["message"] = "Dataset not found: " + data_id;
-			return crow::response(404, response.dump());
-		}
-
-		reader->clear_mchunk_buffer();
-		CROW_LOG_INFO << "[CACHE] Invalidated mchunk_buffer for dataset: " << data_id;
-
-		json response;
-		response["status"] = "ok";
-		response["dataset"] = data_id;
-		return crow::response(200, response.dump());
-	 });
-
 	CROW_ROUTE(app, "/debug_headers")
 	(
 		[](const crow::request &req)
@@ -672,6 +650,39 @@ int main(int argc, char *argv[])
 		out << "</html>\n";
 
 		return out.str(); });
+	
+	// Chunk header Cache invalidation format: channel,i,j,k (e.g., "0,0,1,0")
+	CROW_ROUTE(app, "/<string>/invalidate_cache/<string>").methods("POST"_method)
+	([](std::string data_id, std::string chunk_key)
+	 {
+		archive_reader *reader = search_inventory(data_id);
+		if (reader == nullptr)
+		{
+			json response;
+			response["status"] = "error";
+			response["message"] = "Dataset not found: " + data_id;
+			return crow::response(404, response.dump());
+		}
+
+		unsigned int channel, i, j, k;
+		if (sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &i, &j, &k) != 4)
+		{
+			json response;
+			response["status"] = "error";
+			response["message"] = "Invalid chunk_key format. Expected: channel,i,j,k";
+			return crow::response(400, response.dump());
+		}
+
+		size_t count = reader->invalidate_mchunk(-1, channel, i, j, k);
+		CROW_LOG_INFO << "[CACHE] Invalidated " << count << " tile(s) for dataset: " << data_id << " chunk: " << chunk_key;
+
+		json response;
+		response["status"] = "ok";
+		response["dataset"] = data_id;
+		response["chunk_key"] = chunk_key;
+		response["tiles_invalidated"] = count;
+		return crow::response(200, response.dump());
+	 });
 
 	//	ENDPOINT: /data/<string>/info
 	CROW_ROUTE(app, "/<string>/info")

@@ -1213,6 +1213,43 @@ public:
         mchunk_lru.clear();
     }
 
+    // Invalidate specific tile(s) from cache
+    // Use -1 for any parameter to match all values (wildcard)
+    size_t invalidate_mchunk(int scale = -1, int channel = -1, int i = -1, int j = -1, int k = -1)
+    {
+        std::unique_lock<std::shared_mutex> lock(mchunk_buffer_mutex);
+        size_t count = 0;
+
+        for (auto it = mchunk_buffer.begin(); it != mchunk_buffer.end(); )
+        {
+            auto &key = it->first;
+            bool match = true;
+
+            if (scale >= 0 && std::get<0>(key) != (size_t)scale) match = false;
+            if (channel >= 0 && std::get<1>(key) != (size_t)channel) match = false;
+            if (i >= 0 && std::get<2>(key) != (size_t)i) match = false;
+            if (j >= 0 && std::get<3>(key) != (size_t)j) match = false;
+            if (k >= 0 && std::get<4>(key) != (size_t)k) match = false;
+
+            if (match)
+            {
+                if (it->second != nullptr)
+                {
+                    delete it->second;
+                }
+                // Remove from LRU
+                mchunk_lru.erase(std::remove(mchunk_lru.begin(), mchunk_lru.end(), it->first), mchunk_lru.end());
+                it = mchunk_buffer.erase(it);
+                count++;
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        return count;
+    }
+
     packed_reader *get_mchunk(size_t scale, size_t channel, size_t i, size_t j, size_t k)
     {
         std::chrono::steady_clock::time_point t0, t1;
