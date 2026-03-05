@@ -45,7 +45,7 @@ bool READ_ONLY_MODE = false;
 std::string DATA_PATH = "./data/";
 std::string SERVER_ROOT = "https://server/";
 
-const std::string VERSION_STRING = "V0.10.0";
+const std::string VERSION_STRING = "V0.11.0";
 
 
 using json = nlohmann::json;
@@ -653,8 +653,9 @@ int main(int argc, char *argv[])
 
 		return out.str(); });
 	
-	// Chunk header Cache invalidation format: channel,i,j,k (e.g., "0,0,1,0")
-	CROW_ROUTE(app, "/<string>/invalidate_cache/<string>").methods("POST"_method)
+	// Invalidate chunk header cache (reloads .meta crop values)
+	// Format: channel,i,j,k (e.g., "0,0,1,0") or "all_tiles" for entire dataset
+	CROW_ROUTE(app, "/<string>/invalidate_header_cache/<string>").methods("POST"_method)
 	([](std::string data_id, std::string chunk_key)
 	 {
 		archive_reader *reader = search_inventory(data_id);
@@ -666,22 +667,32 @@ int main(int argc, char *argv[])
 			return crow::response(404, response.dump());
 		}
 
-		unsigned int channel, i, j, k;
-		if (sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &i, &j, &k) != 4)
-		{
-			json response;
-			response["status"] = "error";
-			response["message"] = "Invalid chunk_key format. Expected: channel,i,j,k";
-			return crow::response(400, response.dump());
-		}
-
-		size_t count = reader->invalidate_mchunk(-1, channel, i, j, k);
-		CROW_LOG_INFO << "[CACHE] Invalidated " << count << " tile(s) for dataset: " << data_id << " chunk: " << chunk_key;
-
 		json response;
 		response["status"] = "ok";
 		response["dataset"] = data_id;
 		response["chunk_key"] = chunk_key;
+
+		// Special key: invalidate all tiles
+		if (chunk_key == "all_tiles")
+		{
+			reader->clear_mchunk_buffer();
+			CROW_LOG_INFO << "[CACHE] Invalidated all tiles for dataset: " << data_id;
+			response["tiles_invalidated"] = "all";
+			return crow::response(200, response.dump());
+		}
+
+		// Specific tile: channel,i,j,k
+		unsigned int channel, i, j, k;
+		if (sscanf(chunk_key.c_str(), "%u,%u,%u,%u", &channel, &i, &j, &k) != 4)
+		{
+			json err;
+			err["status"] = "error";
+			err["message"] = "Invalid chunk_key format. Expected: channel,i,j,k or 'all_tiles'";
+			return crow::response(400, err.dump());
+		}
+
+		size_t count = reader->invalidate_mchunk(-1, channel, i, j, k);
+		CROW_LOG_INFO << "[CACHE] Invalidated " << count << " tile(s) for dataset: " << data_id << " chunk: " << chunk_key;
 		response["tiles_invalidated"] = count;
 		return crow::response(200, response.dump());
 	 });
