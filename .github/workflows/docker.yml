@@ -3,6 +3,7 @@ name: docker-build
 on:
   push:
     branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build-amd64:
