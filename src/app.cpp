@@ -44,7 +44,9 @@ bool READ_ONLY_MODE = false;
 
 std::string DATA_PATH = "./data/";
 std::string SERVER_ROOT = "https://server/";
-const std::string VERSION_STRING = "V0.9.1";
+
+const std::string VERSION_STRING = "V0.10.0";
+
 
 using json = nlohmann::json;
 
@@ -1268,6 +1270,165 @@ int main(int argc, char *argv[])
     	res.write(response.dump());
     	res.end(); });
 
+	CROW_ROUTE(app, "/<string>/pointcloud/<string>/info")
+	([](crow::response &res, std::string data_id_in, std::string pointcloud_id)
+	 {
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
+		archive_reader * reader = search_inventory(data_id);
+
+		if(reader == nullptr) {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found -- dataset invalid\n");
+			return;
+		}
+
+		std::vector<std::string> point_metadata = glob_tool(DATA_PATH + data_id + "/pointclouds/" + pointcloud_id + ".json");
+
+		if(point_metadata.size() != 1) {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found -- pointcloud metadata missing\n");
+			return;
+		}
+
+		// Read metadata json
+		std::string metadata_path = point_metadata[0];
+		std::ifstream metadata_file(metadata_path);
+		if (!metadata_file) {
+			res.code = 404;
+			res.end("Metadata file not found");
+			return;
+		}
+		
+		json size;
+
+		try {
+			json info_json = json::parse(metadata_file);
+			size = info_json["size"];
+		} catch (const std::exception& e) {
+			res.code = 500;
+			res.end("Error parsing metadata file: " + std::string(e.what()));
+		}
+
+		std::vector<std::string> csv_file = glob_tool(DATA_PATH + data_id + "/pointclouds/" + pointcloud_id + ".csv");
+
+		if(csv_file.size() != 1) {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found -- pointcloud data missing\n");
+			return;
+		}
+
+		auto csv_data = read_csv(csv_file[0], 1);
+
+		// x,y,z,a,b,c
+		if( csv_data.size() == 0 || csv_data[0].size() < 3 ) {
+			res.code = crow::status::BAD_REQUEST;
+			res.end("400 Bad Request -- Invalid CSV format\n");
+			return;
+		}
+
+		size_t parameter_count = csv_data[0].size() - 3;
+
+		json spatial_index = json::array();
+		spatial_index.push_back({
+                {"key", "spatial0"},
+                {"grid_shape", {1, 1, 1}},
+                {"chunk_size", size}, //{1000, 1000, 1000}},
+                {"limit", 100}
+            });
+
+		json properties = json::array();
+		for(size_t i = 0; i < parameter_count; i++) 
+		{
+			properties.push_back({
+				{"id", std::string(1, 'a' + i)},
+				{"type", "float32"}
+			});
+		}
+
+    	json response = {
+			{"@type", "neuroglancer_annotations_v1"},
+			{"annotation_type", "POINT"},
+			{"properties", properties},
+			{"relationships", json::array()},
+			{"by_id", {
+				{"key", "by_id"}
+			}},
+			{"spatial", spatial_index},
+			{"dimensions", {
+				{"x", {1e-9, "m"}}, // nm
+				{"y", {1e-9, "m"}}, // nm
+				{"z", {1e-9, "m"}} // nm
+			}},
+			{"lower_bound", {0, 0, 0}},
+			{"upper_bound", size} //{1000,1000,1000}}	
+		};
+
+		res.write(response.dump());
+		res.end(); });
+
+	CROW_ROUTE(app, "/<string>/pointcloud/<string>/spatial0/<string>")
+	([](crow::response &res, std::string data_id_in, std::string pointcloud_id, std::string request_chunk)
+	 {	
+		//std::string, std::vector<std::pair<std::string, std::string>>
+		auto [data_id, filters] = parse_filter_list(data_id_in);
+		archive_reader * reader = search_inventory(data_id);
+
+		if(reader == nullptr) {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found -- dataset invalid\n");
+			return;
+		}
+
+		std::vector<std::string> csv_file = glob_tool(DATA_PATH + data_id + "/pointclouds/" + pointcloud_id + ".csv");
+
+		if(csv_file.size() != 1) {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found -- pointcloud data missing\n");
+			return;
+		}
+
+		auto csv_data = read_csv(csv_file[0]);
+
+		// x,y,z,a,b,c
+		if( csv_data.size() == 0 || csv_data[0].size() < 3 ) {
+			res.code = crow::status::BAD_REQUEST;
+			res.end("400 Bad Request -- Invalid CSV format\n");
+			return;
+		}
+
+		size_t col_count = csv_data[0].size();
+		uint64_t point_count = csv_data.size();
+
+		size_t out_size = sizeof(uint64_t) + // point count
+						  csv_data.size() * col_count * sizeof(float) + // points
+						  csv_data.size() * sizeof(uint64_t); // ids
+
+		// Write directly into res.body to avoid a copy
+		res.body.resize(out_size);
+		char* out_buffer = res.body.data();
+
+		((uint64_t*) out_buffer)[0] = point_count;
+
+		float * point_data_ptr = (float*) (out_buffer + sizeof(uint64_t));
+
+		size_t i = 0;
+		for(auto& row : csv_data) {
+			for(size_t col = 0; col < col_count; col++) {
+				float val = (col >= row.size()) ? 0.0f : row[col];
+				point_data_ptr[ (i * col_count) + col ] = val;
+			}
+			i++;
+		}
+
+		uint64_t * id_data_ptr = (uint64_t*) (out_buffer + sizeof(uint64_t) + (point_count * col_count * sizeof(float)));
+
+		for(uint64_t i = 0; i < point_count; i++) {
+			id_data_ptr[i] = i;
+		}
+
+    	res.end(); });
+
 	CROW_ROUTE(app, "/echo").methods("POST"_method)([](const crow::request &req)
 													{
 		crow::multipart::message msg(req);
@@ -1681,6 +1842,15 @@ int main(int argc, char *argv[])
     	}
     	
     	res.end(); });
+
+	CROW_ROUTE(app, "/<string>/pointcloud/<int>")
+	([](crow::response &res, std::string data_id_in, int skeleton_id)
+	 {
+		 // std::string, std::vector<std::pair<std::string, std::string>>
+		 // auto [data_id, filters] = parse_filter_list(data_id_in);
+
+		 res.code = crow::status::NOT_FOUND;
+		 res.end("404 Not Found\n"); });
 
 	//	ENDPOINT: /<string>/raw_access/<c>,<i>,<j>,<k>/info
 	CROW_ROUTE(app, "/<string>/raw_access/<string>/info")

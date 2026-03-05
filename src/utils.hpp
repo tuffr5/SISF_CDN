@@ -1,14 +1,18 @@
 #include <istream>
 #include <sstream>
+#include <fstream>
 
 #include <string>
 #include <algorithm> // std::sort
 #include <limits>
 #include <chrono>
 #include <vector>
+#include <utility>
 
 #include <cstdlib>
 #include <cstdint>
+
+#include <cctype>
 
 #include <random>
 
@@ -642,4 +646,105 @@ void filter_run(uint16_t *data, size_t data_size, std::tuple<size_t, size_t, siz
             data[i] = v;
         }
     }
+}
+
+size_t count_rows(std::string filename) {
+    std::ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        return 0;
+    }
+
+    size_t count = 0;
+    std::string line;
+    while (std::getline(file, line))
+    {
+        count++;
+    }
+
+    return count;
+}
+
+std::vector<std::vector<float>> read_csv(std::string filename, size_t max_rows = std::numeric_limits<size_t>::max())
+{
+    std::vector<std::vector<float>> data;
+    std::ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        return data;
+    }
+
+    if (max_rows == 0)
+    {
+        return data;
+    }
+
+    auto trim_in_place = [](std::string &value)
+    {
+        auto not_space = [](unsigned char ch)
+        {
+            return !std::isspace(ch);
+        };
+
+        value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+        value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    };
+
+    std::string line;
+    while (std::getline(file, line))
+    {
+        trim_in_place(line);
+
+        if (line.empty())
+        {
+            continue;
+        }
+
+        std::vector<std::string> raw_values = str_split(line, ',');
+
+        if (raw_values.empty())
+        {
+            continue;
+        }
+
+        std::vector<float> row;
+        row.reserve(raw_values.size());
+
+        bool parse_failed = false;
+
+        for (auto value : raw_values)
+        {
+            trim_in_place(value);
+
+            if (value.empty())
+            {
+                row.push_back(0.0f);
+                continue;
+            }
+
+            try
+            {
+                row.push_back(std::stof(value));
+            }
+            catch (...)
+            {
+                parse_failed = true;
+                break;
+            }
+        }
+
+        if (!parse_failed && !row.empty())
+        {
+            data.push_back(std::move(row));
+
+            if (data.size() >= max_rows)
+            {
+                break;
+            }
+        }
+    }
+
+    return data;
 }
