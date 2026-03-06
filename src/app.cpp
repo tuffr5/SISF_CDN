@@ -1312,13 +1312,24 @@ int main(int argc, char *argv[])
 		}
 		
 		json size;
+		double x_res = 1.0, y_res = 1.0, z_res = 1.0;  // Resolution in nm (default 1nm)
 
 		try {
 			json info_json = json::parse(metadata_file);
 			size = info_json["size"];
+			// Read resolution if present (in nm per pixel)
+			if (info_json.contains("resolution") && info_json["resolution"].is_array()) {
+				auto res_arr = info_json["resolution"];
+				if (res_arr.size() >= 3) {
+					x_res = res_arr[0].get<double>();
+					y_res = res_arr[1].get<double>();
+					z_res = res_arr[2].get<double>();
+				}
+			}
 		} catch (const std::exception& e) {
 			res.code = 500;
 			res.end("Error parsing metadata file: " + std::string(e.what()));
+			return;
 		}
 
 		std::vector<std::string> csv_file = glob_tool(DATA_PATH + data_id + "/pointclouds/" + pointcloud_id + ".csv");
@@ -1367,9 +1378,9 @@ int main(int argc, char *argv[])
 			}},
 			{"spatial", spatial_index},
 			{"dimensions", {
-				{"x", {1e-9, "m"}}, // nm
-				{"y", {1e-9, "m"}}, // nm
-				{"z", {1e-9, "m"}} // nm
+				{"x", {x_res * 1e-9, "m"}},
+				{"y", {y_res * 1e-9, "m"}},
+				{"z", {z_res * 1e-9, "m"}}
 			}},
 			{"lower_bound", {0, 0, 0}},
 			{"upper_bound", size} //{1000,1000,1000}}	
