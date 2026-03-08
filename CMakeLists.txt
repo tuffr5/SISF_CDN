@@ -12,6 +12,19 @@ include_directories(./ffmpeg_HDF5_filter/src)
 # Define the project name
 project(nTracer_cdn)
 
+# Architecture-specific optimization flags (GLOBAL - applies to all targets)
+message(STATUS "CMAKE_SYSTEM_PROCESSOR = ${CMAKE_SYSTEM_PROCESSOR}")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    message(STATUS "Using ARM64 flags: -march=armv8-a")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=armv8-a")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    message(STATUS "Using x86-64 flags: -march=x86-64-v3 (AVX2, FMA, F16C)")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=x86-64-v3")
+else()
+    message(WARNING "Unknown processor: ${CMAKE_SYSTEM_PROCESSOR}, using generic -O3")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
+endif()
+
 # Add an executable target
 add_executable(nTracer_cdn src/app.cpp)
 
@@ -37,21 +50,8 @@ cmake_print_variables(CAI_FFMPEG_LIB)
 
 target_include_directories(nTracer_cdn PRIVATE "/usr/include/hdf5/serial/")
 
-# Architecture-specific optimization flags
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
-    # ARM64 (Apple Silicon, Linux ARM)
-    set(ARCH_FLAG "-march=armv8-a")
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    # x86-64 with AVX2 support (Haswell 2013+)
-    set(ARCH_FLAG "-march=x86-64-v3")
-else()
-    set(ARCH_FLAG "")
-endif()
-
-# If you build locally, you can use -march=native
-# set(ARCH_FLAG "-march=native")
-
-target_compile_options(nTracer_cdn PUBLIC -O3 ${ARCH_FLAG} -Wl,--no-as-needed -ldl)
+# Linker options
+target_link_options(nTracer_cdn PUBLIC -Wl,--no-as-needed -ldl)
 
 
 FetchContent_Declare(
