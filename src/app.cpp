@@ -38,8 +38,7 @@ bool READ_ONLY_MODE = false;
 std::string DATA_PATH = "./data/";
 std::string SERVER_ROOT = "https://server/";
 
-const std::string VERSION_STRING = "V0.10.0";
-
+const std::string VERSION_STRING = "V0.11.0";
 
 using json = nlohmann::json;
 
@@ -1044,9 +1043,10 @@ int main(int argc, char *argv[])
 	 {
 		//std::string, std::vector<std::pair<std::string, std::string>>
 		auto [data_id, filters] = parse_filter_list(data_id_in);
-		archive_reader * reader = search_inventory(data_id);
+		archive_reader *reader = search_inventory(data_id);
 
-		if(reader == nullptr) {
+		if (reader == nullptr)
+		{
 			res.code = crow::status::NOT_FOUND;
 			res.end("404 Not Found -- dataset invalid\n");
 			return;
@@ -1054,7 +1054,8 @@ int main(int argc, char *argv[])
 
 		std::vector<std::string> point_metadata = glob_tool(DATA_PATH + data_id + "/pointclouds/" + pointcloud_id + ".json");
 
-		if(point_metadata.size() != 1) {
+		if (point_metadata.size() != 1)
+		{
 			res.code = crow::status::NOT_FOUND;
 			res.end("404 Not Found -- pointcloud metadata missing\n");
 			return;
@@ -1063,34 +1064,54 @@ int main(int argc, char *argv[])
 		// Read metadata json
 		std::string metadata_path = point_metadata[0];
 		std::ifstream metadata_file(metadata_path);
-		if (!metadata_file) {
+		if (!metadata_file)
+		{
 			res.code = 404;
 			res.end("Metadata file not found");
 			return;
 		}
-		
-		json size;
 
-		try {
-			json info_json = json::parse(metadata_file);
+		json size;
+		json dimensions = {
+			{"x", {1e-9, "m"}}, // nm
+			{"y", {1e-9, "m"}}, // nm
+			{"z", {1e-9, "m"}}	// nm
+		};
+		json info_json;
+
+		try
+		{
+			info_json = json::parse(metadata_file);
 			size = info_json["size"];
-		} catch (const std::exception& e) {
+		}
+		catch (const std::exception &e)
+		{
 			res.code = 500;
 			res.end("Error parsing metadata file: " + std::string(e.what()));
 		}
 
+		try
+		{
+			dimensions = info_json["dimensions"];
+		}
+		catch (const std::exception &e)
+		{
+		}
+
 		std::vector<std::string> csv_file = glob_tool(DATA_PATH + data_id + "/pointclouds/" + pointcloud_id + ".csv");
 
-		if(csv_file.size() != 1) {
+		if (csv_file.size() != 1)
+		{
 			res.code = crow::status::NOT_FOUND;
 			res.end("404 Not Found -- pointcloud data missing\n");
 			return;
 		}
 
-		auto csv_data = read_csv(csv_file[0], 1);
+		auto [headers, csv_data] = read_csv(csv_file[0], 1);
 
 		// x,y,z,a,b,c
-		if( csv_data.size() == 0 || csv_data[0].size() < 3 ) {
+		if (csv_data.size() == 0 || csv_data[0].size() < 3 || headers.size() < 3 || headers.size() != csv_data[0].size())
+		{
 			res.code = crow::status::BAD_REQUEST;
 			res.end("400 Bad Request -- Invalid CSV format\n");
 			return;
@@ -1099,39 +1120,38 @@ int main(int argc, char *argv[])
 		size_t parameter_count = csv_data[0].size() - 3;
 
 		json spatial_index = json::array();
-		spatial_index.push_back({
-                {"key", "spatial0"},
-                {"grid_shape", {1, 1, 1}},
-                {"chunk_size", size}, //{1000, 1000, 1000}},
-                {"limit", 100}
-            });
+		spatial_index.push_back({{"key", "spatial0"},
+								 {"grid_shape", {1, 1, 1}},
+								 {"chunk_size", size},
+								 {"limit", 100}});
 
 		json properties = json::array();
-		for(size_t i = 0; i < parameter_count; i++) 
+		for (size_t i = 0; i < parameter_count; i++)
 		{
-			properties.push_back({
-				{"id", std::string(1, 'a' + i)},
-				{"type", "float32"}
-			});
+			auto first_value = csv_data[0][i + 3];
+
+			if (std::holds_alternative<double>(first_value))
+			{
+				properties.push_back({{"id", headers[i + 3]},
+									  {"type", "float32"}});
+			}
+			else if (std::holds_alternative<int64_t>(first_value))
+			{
+				properties.push_back({{"id", headers[i + 3]},
+									  {"type", "uint32"}});
+			}
 		}
 
-    	json response = {
+		json response = {
 			{"@type", "neuroglancer_annotations_v1"},
 			{"annotation_type", "POINT"},
 			{"properties", properties},
 			{"relationships", json::array()},
-			{"by_id", {
-				{"key", "by_id"}
-			}},
+			{"by_id", {{"key", "by_id"}}},
 			{"spatial", spatial_index},
-			{"dimensions", {
-				{"x", {1e-9, "m"}}, // nm
-				{"y", {1e-9, "m"}}, // nm
-				{"z", {1e-9, "m"}} // nm
-			}},
+			{"dimensions", dimensions},
 			{"lower_bound", {0, 0, 0}},
-			{"upper_bound", size} //{1000,1000,1000}}	
-		};
+			{"upper_bound", size}};
 
 		res.write(response.dump());
 		res.end(); });
@@ -1157,20 +1177,32 @@ int main(int argc, char *argv[])
 			return;
 		}
 
-		auto csv_data = read_csv(csv_file[0]);
+		auto [headers, csv_data] = read_csv(csv_file[0]);
 
 		// x,y,z,a,b,c
-		if( csv_data.size() == 0 || csv_data[0].size() < 3 ) {
+		if( csv_data.size() == 0 || csv_data[0].size() < 3 || headers.size() < 3 || headers.size() != csv_data[0].size() ) {
 			res.code = crow::status::BAD_REQUEST;
 			res.end("400 Bad Request -- Invalid CSV format\n");
 			return;
 		}
 
 		size_t col_count = csv_data[0].size();
+		size_t row_size = sizeof(float) * 3;
+		for(size_t i = 3; i < csv_data[0].size(); i++) {
+			if(std::holds_alternative<double>(csv_data[0][i])) {
+				row_size += sizeof(float);
+			} else if (std::holds_alternative<int64_t>(csv_data[0][i])) {
+				row_size += sizeof(int32_t);
+			} else {
+				res.code = crow::status::BAD_REQUEST;
+				res.end("400 Bad Request -- Unsupported data type in CSV\n");
+				return;
+			}
+		}
 		uint64_t point_count = csv_data.size();
 
 		size_t out_size = sizeof(uint64_t) + // point count
-						  csv_data.size() * col_count * sizeof(float) + // points
+						  csv_data.size() * row_size + // point data
 						  csv_data.size() * sizeof(uint64_t); // ids
 
 		// Write directly into res.body to avoid a copy
@@ -1179,18 +1211,47 @@ int main(int argc, char *argv[])
 
 		((uint64_t*) out_buffer)[0] = point_count;
 
-		float * point_data_ptr = (float*) (out_buffer + sizeof(uint64_t));
+		char* write_ptr = out_buffer + sizeof(uint64_t);
 
-		size_t i = 0;
 		for(auto& row : csv_data) {
-			for(size_t col = 0; col < col_count; col++) {
-				float val = (col >= row.size()) ? 0.0f : row[col];
-				point_data_ptr[ (i * col_count) + col ] = val;
+			// First 3 columns are always float (x, y, z)
+			for(size_t col = 0; col < 3; col++) {
+				float val = 0.0f;
+				if (col < row.size()) {
+					if (std::holds_alternative<double>(row[col])) {
+						val = static_cast<float>(std::get<double>(row[col]));
+					} else if (std::holds_alternative<int64_t>(row[col])) {
+						val = static_cast<float>(std::get<int64_t>(row[col]));
+					}
+				}
+				*reinterpret_cast<float*>(write_ptr) = val;
+				write_ptr += sizeof(float);
 			}
-			i++;
+
+			// Remaining columns preserve their type
+			for(size_t col = 3; col < col_count; col++) {
+				if (col < row.size()) {
+					if (std::holds_alternative<double>(row[col])) {
+						*reinterpret_cast<float*>(write_ptr) = static_cast<float>(std::get<double>(row[col]));
+						write_ptr += sizeof(float);
+					} else if (std::holds_alternative<int64_t>(row[col])) {
+						*reinterpret_cast<int32_t*>(write_ptr) = std::get<int64_t>(row[col]);
+						write_ptr += sizeof(int32_t);
+					}
+				} else {
+					// Default to float 0 for missing columns - check first row for type
+					if (std::holds_alternative<double>(csv_data[0][col])) {
+						*reinterpret_cast<float*>(write_ptr) = 0.0f;
+						write_ptr += sizeof(float);
+					} else {
+						*reinterpret_cast<int32_t*>(write_ptr) = 0;
+						write_ptr += sizeof(int32_t);
+					}
+				}
+			}
 		}
 
-		uint64_t * id_data_ptr = (uint64_t*) (out_buffer + sizeof(uint64_t) + (point_count * col_count * sizeof(float)));
+		uint64_t * id_data_ptr = (uint64_t*) (out_buffer + sizeof(uint64_t) + (point_count * row_size));
 
 		for(uint64_t i = 0; i < point_count; i++) {
 			id_data_ptr[i] = i;

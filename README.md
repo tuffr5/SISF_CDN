@@ -149,7 +149,6 @@ The data storage strategy described here relies on two layers of segmentation
 
 **Notes:**
 - Individual parts of this structure can be symlinked to different file systems (e.g. tmpfs or a cache SSD)
-- 
 
 ### Chunk naming scheme
 
@@ -212,6 +211,32 @@ for i in range(count):
 - `1 -> uint16`
 - `2 -> uint8` (not implemented) 
 
+## Pointcloud annotation support
+
+For any dataset, a `/pointcloud` subfolder can be added, which will result in 
+For each annotation you will need:
+- `<name>.csv` a CSV file
+- `<name>.json` which represents the bounding box size and resolution of the annotations (see below).
+
+### CSV format
+
+```
+<X>,<Y>,<Z>,<prop_a>,<prop_b>,<prob_c>
+1,2,3,123,1.1,1.2
+```
+
+* Header names for `X`, `Y`, `Z` are not parsed
+* Properties are parsed as either `int32` or `float32` based on the first line of data
+
+### Example json file
+
+```
+{
+	"size":[2720,2720,562],
+	"dimensions":{"x":[1e-09,"m"],"y":[1e-09,"m"],"z":[1e-09,"m"]}
+}
+```
+
 ## References
 
 ### Citation
@@ -221,7 +246,7 @@ If you find this project to be useful for your research, we ask that you cite:
 ```
 A browser-based platform for storage, visualization, and analysis of large-scale 3D images in HPC environments
 
-Logan A Walker, Wei Jie Lee, Bin Duan, Menelik Weatherspoon, Ye Li, Fred Y. Shen, Mou-Chi Cheng, Xiaoman Niu, Jacob Eggerd, Bin Xie, Jimmy Hon Pong Cheng, Humphrey Xu, Xiao-Xiang Zhong, Hehai Jiang, Meng Cui, Yan Yan, Dawen Cai
+Logan A Walker*, Wei Jie Lee*, Bin Duan, Menelik Weatherspoon, Ye Li, Fred Y. Shen, Mou-Chi Cheng, Xiaoman Niu, Jacob Eggerd, Kevin Zhang, Bin Xie, Jimmy Hon Pong Cheng, Humphrey Xu, Xiao-Xiang Zhong, Hehai Jiang, Meng Cui, Yan Yan, Dawen Cai
 
 bioRxiv 2024.10.04.616591; doi: https://doi.org/10.1101/2024.10.04.616591
 ```
