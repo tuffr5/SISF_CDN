@@ -37,7 +37,21 @@ cmake_print_variables(CAI_FFMPEG_LIB)
 
 target_include_directories(nTracer_cdn PRIVATE "/usr/include/hdf5/serial/")
 
-target_compile_options(nTracer_cdn PUBLIC -O3 -march=native -Wl,--no-as-needed -ldl)
+# Architecture-specific optimization flags
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    # ARM64 (Apple Silicon, Linux ARM)
+    set(ARCH_FLAG "-march=armv8-a")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    # x86-64 with AVX2 support (Haswell 2013+)
+    set(ARCH_FLAG "-march=x86-64-v3")
+else()
+    set(ARCH_FLAG "")
+endif()
+
+# If you build locally, you can use -march=native
+# set(ARCH_FLAG "-march=native")
+
+target_compile_options(nTracer_cdn PUBLIC -O3 ${ARCH_FLAG} -Wl,--no-as-needed -ldl)
 
 
 FetchContent_Declare(
