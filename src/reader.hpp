@@ -57,6 +57,8 @@
 #include "tensorstore/util/str_cat.h"
 #include "tensorstore/util/utf8_string.h"
 
+#include <sys/stat.h>
+
 #define CHUNK_TIMER 0
 #define DEBUG_SLICING 0
 #define IO_RETRY_COUNT 5
@@ -129,6 +131,18 @@ std::vector<std::string> glob_tool(const std::string &pattern)
     return filenames;
 }
 
+// Return time_t of given files modification time,
+// 0 if file does not exist or error occurs
+time_t get_file_mtime(std::string filename)
+{
+    struct stat result;
+    if (stat(filename.c_str(), &result) == 0)
+    {
+        return result.st_mtime;
+    }
+    return 0;
+}
+
 struct metadata_entry
 {
     uint64_t offset;
@@ -158,6 +172,8 @@ public:
 
     size_t this_mchunk_id;
 
+    time_t last_meta_read_time = 0;
+
     std::string meta_fname, data_fname;
 
     packed_reader(size_t chunk_id, std::string metadata_fname_in, std::string data_fname_in)
@@ -167,12 +183,61 @@ public:
         meta_fname = metadata_fname_in;
         data_fname = data_fname_in;
 
+        if (last_meta_read_time == 0)
+        {
+            check_mtime_hasmodified();
+        }
+
+        reload_metadata(false);
+    }
+
+    ~packed_reader()
+    {
+    }
+
+    bool check_mtime_hasmodified()
+    {
+        time_t mtime = get_file_mtime(meta_fname);
+
+        if (last_meta_read_time != mtime)
+        {
+            last_meta_read_time = mtime;
+            return true;
+        }
+
+        return false;
+    }
+
+    void clear_cache_lines()
+    {
+        global_chunk_cache_mutex.lock();
+        for (size_t i = 0; i < global_cache_size; i++)
+        {
+            if (global_chunk_cache[i].mchunk == this_mchunk_id)
+            {
+                if (global_chunk_cache[i].ptr != 0)
+                {
+                    free(global_chunk_cache[i].ptr);
+                }
+                global_chunk_cache[i].ptr = 0;
+            }
+        }
+        global_chunk_cache_mutex.unlock();
+    }
+
+    void reload_metadata(bool reset_cache = true)
+    {
         std::ifstream file(meta_fname, std::ios::in | std::ios::binary);
 
         if (file.fail())
         {
             std::cerr << "Fopen failed (chunk metadata)" << std::endl;
             return;
+        }
+
+        if (last_meta_read_time == 0)
+        {
+            check_mtime_hasmodified();
         }
 
         std::streamsize bytes_read = 0;
@@ -227,10 +292,11 @@ public:
         max_chunk_size = channel_count * chunkx * chunky * chunkz * sizeof(uint16_t);
 
         is_valid = true;
-    }
 
-    ~packed_reader()
-    {
+        if (reset_cache)
+        {
+            clear_cache_lines();
+        }
     }
 
     size_t find_index(size_t x, size_t y, size_t z)
@@ -258,6 +324,12 @@ public:
             {
                 std::cerr << "Fopen failed (metadata)" << std::endl;
                 continue;
+            }
+
+            if (check_mtime_hasmodified())
+            {
+                std::cerr << "Metadata file modified on disk for " << meta_fname << ", reloading metadata" << std::endl;
+                reload_metadata();
             }
 
             file.seekg(offset);
@@ -518,7 +590,9 @@ public:
                     if (global_chunk_cache[i].mchunk == this_mchunk_id)
                     {
                         if (global_chunk_cache[i].ptr != 0)
+                        {
                             free(global_chunk_cache[i].ptr);
+                        }
                         global_chunk_cache[i].ptr = 0;
                     }
                 }

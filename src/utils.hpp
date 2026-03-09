@@ -15,6 +15,8 @@
 
 #include <cctype>
 
+#include <sys/stat.h>
+
 #include <random>
 
 std::string read_env_variable(std::string name)
