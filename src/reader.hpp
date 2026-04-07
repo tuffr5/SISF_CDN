@@ -1761,6 +1761,12 @@ public:
 
             packed_reader *chunk_writer = get_mchunk(1, std::get<0>(id_tuple), std::get<1>(id_tuple), std::get<2>(id_tuple), std::get<3>(id_tuple));
 
+            if (chunk_writer == nullptr)
+            {
+                free(it->second);
+                continue;
+            }
+
             size_t chunk_size = std::get<0>(chunk_sizes[it->second]) * std::get<1>(chunk_sizes[it->second]) * std::get<2>(chunk_sizes[it->second]) * sizeof(uint16_t);
 
             chunk_writer->overwrite_chunk(std::get<4>(id_tuple), it->second, chunk_size);
