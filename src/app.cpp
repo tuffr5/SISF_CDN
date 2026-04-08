@@ -1090,12 +1090,23 @@ int main(int argc, char *argv[])
 			res.end("Error parsing metadata file: " + std::string(e.what()));
 		}
 
-		try
-		{
+		if (info_json.contains("dimensions")) {
 			dimensions = info_json["dimensions"];
 		}
-		catch (const std::exception &e)
-		{
+		else if (info_json.contains("resolution") && info_json["resolution"].is_array()) {
+			auto& res_arr = info_json["resolution"];
+			if (res_arr.size() >= 3) {
+				dimensions = {
+					{"x", {res_arr[0].get<double>() * 1e-9, "m"}},
+					{"y", {res_arr[1].get<double>() * 1e-9, "m"}},
+					{"z", {res_arr[2].get<double>() * 1e-9, "m"}}
+				};
+			}
+		}
+		else {
+			res.code = crow::status::NOT_FOUND;
+			res.end("404 Not Found -- pointcloud dimensions missing\n");
+			return;
 		}
 
 		std::vector<std::string> csv_file = glob_tool(DATA_PATH + data_id + "/pointclouds/" + pointcloud_id + ".csv");
