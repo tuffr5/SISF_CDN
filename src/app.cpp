@@ -2106,11 +2106,12 @@ int main(int argc, char *argv[])
 			return;
 		}
 
-		if(!reader->verify_protection(filters)) {
-			res.code = crow::status::FORBIDDEN;
-			res.end("403 Forbidden\n");
-			return;
-		}
+		// Read operations are public - no token check needed
+		// if(!reader->verify_protection(filters)) {
+		// 	res.code = crow::status::FORBIDDEN;
+		// 	res.end("403 Forbidden\n");
+		// 	return;
+		// }
 
 		unsigned int x_begin, x_end, y_begin, y_end, z_begin, z_end;
 		// <xBegin>-<xEnd>_<yBegin>-<yEnd>_<zBegin>-<zEnd>

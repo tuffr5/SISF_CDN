@@ -582,6 +582,10 @@ public:
             replace_meta_entry(id, new_entry);
             free(new_entry);
 
+            // Update cached mtime so our own write is not detected as
+            // an external modification on the next read.
+            last_meta_read_time = get_file_mtime(meta_fname);
+
             // Delete the prexisting values in the cache
             for (size_t i = 0; i < global_cache_size; i++)
             {
